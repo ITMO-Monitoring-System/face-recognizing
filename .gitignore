@@ -1,0 +1,62 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+
+# venv (локальное окружение)
+.venv/
+venv/
+ENV/
+
+# Кэш/тесты
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- ОС/редакторы ---
+# Windows
+Thumbs.db
+Desktop.ini
+# macOS
+.DS_Store
+# IDE
+.vscode/
+.idea/
+
+# --- Логи/временные ---
+*.log
+*.tmp
+*.temp
+*.swp
+*.bak
+
+# --- Конфиги/секреты (если появятся) ---
+.env
+*.env
+*.secret
+secrets.json
+
+# --- Данные проекта (не код) ---
+# база эмбеддингов генерируется скриптом
+embeddings_db.json
+# тестовые медиа
+faces/
+samples/
+data/
+uploads/
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+*.mp4
+*.mov
+*.avi
+
+# --- Docker ---
+*.pid
+*.tar
