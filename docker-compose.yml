@@ -13,7 +13,7 @@ services:
       - "6379:6379"
 
   face-service:
-    build: .
+    image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
     depends_on:
       - rabbitmq
       - redis
