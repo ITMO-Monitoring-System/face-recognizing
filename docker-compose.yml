@@ -1,0 +1,32 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5572:5572"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: pass
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  face-service:
+    build: .
+    depends_on:
+      - rabbitmq
+      - redis
+    ports:
+      - "8180:8180"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RABBIT_HOST: rabbitmq
+      RABBIT_PORT: 5572
+      RABBIT_USER: user
+      RABBIT_PASS: pass
+    command: [ "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8180" ]
+    volumes:
+      - ./:/data
+      - ${INSIGHTFACE_MODELS}:/root/.insightface
+    working_dir: /data

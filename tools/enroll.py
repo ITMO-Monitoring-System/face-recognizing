@@ -1,9 +1,9 @@
-import os, json, cv2, numpy as np
+import json, cv2
 from pathlib import Path
-from retina_embending import get_face_embeddings
+from face_service.core.retina_embending import get_face_embeddings
 
-DATA_DIR = Path("faces")
-DB_PATH = Path("embeddings_db.json")
+DATA_DIR = Path("../faces")
+DB_PATH = Path("../embeddings_db.json")
 
 def enroll_folder():
     db = []

@@ -8,6 +8,7 @@ from insightface.app import FaceAnalysis
 app = FaceAnalysis(allowed_modules=["detection", "recognition"])
 app.prepare(ctx_id=-1, det_size=(640, 640))
 
+#лицо в эмбендинг
 def get_face_embeddings(img_bgr: np.ndarray):
     faces = app.get(img_bgr)              # детект + выравнивание внутри
     out = []
