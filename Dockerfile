@@ -1,13 +1,11 @@
 # syntax=docker/dockerfile:1.6
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    libgl1 \
-    libglib2.0-0 \
-    build-essential \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -o Acquire::ForceIPv4=true -o Acquire::Retries=5 -o Acquire::http::Timeout=30 && \
+    apt-get install -y --no-install-recommends \
+      libgl1 libglib2.0-0 build-essential g++ && \
+    rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
