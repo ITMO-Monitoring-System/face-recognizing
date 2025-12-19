@@ -42,8 +42,6 @@ def drop_dataset(lecture_id: str):
     deleted = delete_dataset(rdb, lecture_id)
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
 
-persons = load_persons(PersonsSource(mode="json"))  # как у тебя сейчас
-
 _worker_thread: Optional[threading.Thread] = None
 
 
