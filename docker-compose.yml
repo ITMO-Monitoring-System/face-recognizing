@@ -17,15 +17,15 @@ services:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
     environment:
       NO_ALBUMENTATIONS_UPDATE: "1"
-    command:
-      [
-        "python",
-        "-c",
-        "from insightface.app import FaceAnalysis; app=FaceAnalysis(allowed_modules=['detection','recognition']); app.prepare(ctx_id=-1, det_size=(640,640)); print('model ready')"
-      ]
-    volumes:
-      - /opt/insightface:/root/.insightface
     working_dir: /app
+    volumes:
+      - /home/deploy/insightface:/root/.insightface
+    entrypoint: ["/bin/sh","-lc"]
+    command: >
+      python -c "from insightface.app import FaceAnalysis;
+      app=FaceAnalysis(allowed_modules=['detection','recognition']);
+      app.prepare(ctx_id=-1, det_size=(640,640));
+      print('model ready')"
 
   face-service:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
