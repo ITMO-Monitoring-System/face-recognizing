@@ -42,8 +42,6 @@ def drop_dataset(lecture_id: str):
     deleted = delete_dataset(rdb, lecture_id)
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
 
-persons = load_persons(PersonsSource(mode="json"))  # как у тебя сейчас
-
 _worker_thread: Optional[threading.Thread] = None
 
 
@@ -51,6 +49,9 @@ class ConnectIn(BaseModel):
     lecture_id: str
     in_amqp_url: str
     in_queue: str
+    out_amqp_url: str
+    out_queue: str
+    threshold: float = 0.45
 
 
 def start_consumer(cfg: ConnectIn):
