@@ -7,10 +7,27 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: user
       RABBITMQ_DEFAULT_PASS: pass
+
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+
+  model-preload:
+    image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
+    depends_on:
+      - redis
+    environment:
+      NO_ALBUMENTATIONS_UPDATE: "1"
+    command:
+      [
+        "python",
+        "-c",
+        "from insightface.app import FaceAnalysis; app=FaceAnalysis(allowed_modules=['detection','recognition']); app.prepare(ctx_id=-1, det_size=(640,640)); print('model ready')"
+      ]
+    volumes:
+      - ${INSIGHTFACE_MODELS}:/root/.insightface
+    working_dir: /app
 
   face-service:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
