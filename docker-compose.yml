@@ -7,10 +7,25 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: user
       RABBITMQ_DEFAULT_PASS: pass
+
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+
+  model-preload:
+    image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
+    environment:
+      NO_ALBUMENTATIONS_UPDATE: "1"
+    working_dir: /app
+    volumes:
+      - /home/deploy/insightface:/root/.insightface
+    entrypoint: ["/bin/sh","-lc"]
+    command: >
+      python -c "from insightface.app import FaceAnalysis;
+      app=FaceAnalysis(allowed_modules=['detection','recognition']);
+      app.prepare(ctx_id=-1, det_size=(640,640));
+      print('model ready')"
 
   face-service:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
@@ -21,12 +36,10 @@ services:
       - "8180:8180"
     environment:
       REDIS_URL: redis://redis:6379/0
-      RABBIT_HOST: rabbitmq
-      RABBIT_PORT: 5672
-      RABBIT_USER: user
-      RABBIT_PASS: pass
-    command: [ "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8180" ]
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+      NO_ALBUMENTATIONS_UPDATE: "1"
+    command: [ "python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8180", "--log-level", "debug" ]
     volumes:
-      - ./:/data
-      - ${INSIGHTFACE_MODELS}:/root/.insightface
-    working_dir: /data
+      - /home/deploy/insightface:/root/.insightface
+    working_dir: /app
