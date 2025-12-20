@@ -1,9 +1,10 @@
 import json
+import os
 import threading
 from typing import Optional
 
 import pika
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from typing import List
@@ -46,23 +47,38 @@ _worker_thread: Optional[threading.Thread] = None
 
 
 class ConnectIn(BaseModel):
-    lecture_id: str
-    in_amqp_url: str
-    in_queue: str
-    out_amqp_url: str
-    out_queue: str
+    lecture_id: str = Field(..., min_length=1)
+    in_amqp_url: str = Field(..., min_length=1)
+    in_queue: str = Field(..., min_length=1)
+
+    # backward-compatible: если пришлют — используем; если нет — возьмем из ENV
+    out_amqp_url: Optional[str] = None
+    out_queue: Optional[str] = None
+
     threshold: float = 0.45
+
+def resolve_out(cfg: ConnectIn) -> tuple[str, str]:
+    out_url = cfg.out_amqp_url or os.getenv("OUT_AMQP_URL")
+    out_queue = cfg.out_queue or os.getenv("OUT_QUEUE")
+
+    if not out_url or not out_queue:
+        raise ValueError("OUT is not configured: set out_amqp_url/out_queue in request or OUT_AMQP_URL/OUT_QUEUE in env")
+
+    return out_url, out_queue
+
 
 
 def start_consumer(cfg: ConnectIn):
+    out_amqp_url, out_queue = resolve_out(cfg)
+
     in_conn = pika.BlockingConnection(pika.URLParameters(cfg.in_amqp_url))
     in_ch = in_conn.channel()
     in_ch.queue_declare(queue=cfg.in_queue, durable=True)
     in_ch.basic_qos(prefetch_count=1)
 
-    out_conn = pika.BlockingConnection(pika.URLParameters(cfg.out_amqp_url))
+    out_conn = pika.BlockingConnection(pika.URLParameters(out_amqp_url))
     out_ch = out_conn.channel()
-    out_ch.queue_declare(queue=cfg.out_queue, durable=True)
+    out_ch.queue_declare(queue=out_queue, durable=True)
 
     def on_message(ch, method, props, body: bytes):
         try:
@@ -120,6 +136,11 @@ def connect(cfg: ConnectIn):
     global _worker_thread
     if _worker_thread and _worker_thread.is_alive():
         return {"ok": False, "error": "already connected"}
+
+    try:
+        resolve_out(cfg)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     _worker_thread = threading.Thread(target=start_consumer, args=(cfg,), daemon=True)
     _worker_thread.start()
