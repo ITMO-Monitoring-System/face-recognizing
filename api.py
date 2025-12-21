@@ -48,7 +48,6 @@ def drop_dataset(lecture_id: str):
 # Consumer state
 # -----------------------------
 class ConnectIn(BaseModel):
-    lecture_id: str = Field(..., min_length=1)
     in_amqp_url: str = Field(..., min_length=1)
     in_queue: str = Field(..., min_length=1)
     threshold: float = 0.45
@@ -124,7 +123,7 @@ def start_consumer(cfg: ConnectIn):
     with _state_lock:
         _state.update(
             running=True,
-            lecture_id=cfg.lecture_id,
+            lecture_id=None,
             in_queue=cfg.in_queue,
             in_amqp_url=cfg.in_amqp_url,
             out_queue=out_queue,
@@ -143,7 +142,7 @@ def start_consumer(cfg: ConnectIn):
             _in_conn = in_conn
             _in_ch = in_ch
 
-        log.info("[consumer] started lecture_id=%s in_queue=%s out_queue=%s", cfg.lecture_id, cfg.in_queue, out_queue)
+        log.info("[consumer] started in_queue=%s out_queue=%s", cfg.in_queue, out_queue)
 
     except Exception as e:
         with _state_lock:
@@ -186,23 +185,27 @@ def start_consumer(cfg: ConnectIn):
     # 4) Consume callback
     def on_message(ch, method, props, body: bytes):
         global _last_result
+        lecture_id = None
         try:
             msg = json.loads(body.decode("utf-8"))
+            lecture_id = msg.get("lecture_id")
+            with _state_lock:
+                _state["lecture_id"] = lecture_id
             request_id = msg.get("request_id")
             image_b64 = msg.get("image_b64")
 
-            if not request_id or not image_b64:
+            if not lecture_id or not request_id or not image_b64:
                 result = {
-                    "lecture_id": cfg.lecture_id,
+                    "lecture_id": lecture_id,
                     "request_id": request_id,
                     "person_id": None,
                     "error": "bad_message",
                 }
             else:
-                persons = load_dataset(rdb, cfg.lecture_id)
+                persons = load_dataset(rdb, lecture_id)
                 if not persons:
                     result = {
-                        "lecture_id": cfg.lecture_id,
+                        "lecture_id": lecture_id,
                         "request_id": request_id,
                         "person_id": None,
                         "error": "dataset_not_loaded",
@@ -220,7 +223,7 @@ def start_consumer(cfg: ConnectIn):
                             break
 
                     result = {
-                        "lecture_id": cfg.lecture_id,
+                        "lecture_id": lecture_id,
                         "request_id": request_id,
                         "person_id": person_id,
                         "error": None,
@@ -238,7 +241,7 @@ def start_consumer(cfg: ConnectIn):
 
         except Exception as e:
             err = {
-                "lecture_id": cfg.lecture_id,
+                "lecture_id": lecture_id,
                 "request_id": None,
                 "person_id": None,
                 "error": str(e),
@@ -309,7 +312,7 @@ def connect(cfg: ConnectIn):
 
     _worker_thread = threading.Thread(target=start_consumer, args=(cfg,), daemon=True)
     _worker_thread.start()
-    return {"ok": True, "lecture_id": cfg.lecture_id, "status": "connected", "out_queue": out_queue}
+    return {"ok": True, "status": "connected", "out_queue": out_queue}
 
 @app.post("/disconnect")
 def disconnect():
