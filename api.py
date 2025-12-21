@@ -1,7 +1,8 @@
 import json
 import logging
+import os
 import threading
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import pika
 import numpy as np
@@ -64,14 +65,24 @@ _state: Dict[str, Any] = {
     "lecture_id": None,
     "in_queue": None,
     "in_amqp_url": None,
+    "out_queue": None,
+    "out_amqp_url": None,
     "last_error": None,
 }
 
+# -----------------------------
+# OUT resolve from ENV
+# -----------------------------
+def resolve_out_from_env() -> Tuple[str, str]:
+    out_amqp_url = os.getenv("OUT_AMQP_URL")
+    out_queue = os.getenv("OUT_QUEUE")
+
+    if not out_amqp_url or not out_queue:
+        raise ValueError("OUT is not configured: set OUT_AMQP_URL and OUT_QUEUE env vars")
+
+    return out_amqp_url, out_queue
+
 def _test_rabbit_connect(amqp_url: str) -> None:
-    """
-    Быстрый тест: резолв + TCP + AMQP handshake.
-    Если не вышло — кинет исключение.
-    """
     params = pika.URLParameters(amqp_url)
     params.socket_timeout = 5
     params.connection_attempts = 1
@@ -82,25 +93,60 @@ def _test_rabbit_connect(amqp_url: str) -> None:
 def start_consumer(cfg: ConnectIn):
     global _last_result
 
+    # -----------------------------
+    # prepare OUT connection once
+    # -----------------------------
+    try:
+        out_amqp_url, out_queue = resolve_out_from_env()
+    except Exception as e:
+        with _state_lock:
+            _state["last_error"] = str(e)
+            _state["running"] = False
+        log.error("[consumer] OUT env missing: %s", e)
+        return
+
     with _state_lock:
         _state.update(
             running=True,
             lecture_id=cfg.lecture_id,
             in_queue=cfg.in_queue,
             in_amqp_url=cfg.in_amqp_url,
+            out_queue=out_queue,
+            out_amqp_url=out_amqp_url,
             last_error=None,
         )
 
     try:
-        params = pika.URLParameters(cfg.in_amqp_url)
-        params.heartbeat = 30
-        params.blocked_connection_timeout = 30
-        in_conn = pika.BlockingConnection(params)
+        # IN connection (Дима -> я)
+        in_params = pika.URLParameters(cfg.in_amqp_url)
+        in_params.heartbeat = 30
+        in_params.blocked_connection_timeout = 30
+        in_conn = pika.BlockingConnection(in_params)
         in_ch = in_conn.channel()
         in_ch.queue_declare(queue=cfg.in_queue, durable=True)
         in_ch.basic_qos(prefetch_count=1)
 
-        log.info("[consumer] started lecture_id=%s in_queue=%s", cfg.lecture_id, cfg.in_queue)
+        # OUT connection (я -> rabbit -> Артём читает)
+        out_params = pika.URLParameters(out_amqp_url)
+        out_params.heartbeat = 30
+        out_params.blocked_connection_timeout = 30
+        out_conn = pika.BlockingConnection(out_params)
+        out_ch = out_conn.channel()
+        out_ch.queue_declare(queue=out_queue, durable=True)
+
+        log.info(
+            "[consumer] started lecture_id=%s in_queue=%s out_queue=%s",
+            cfg.lecture_id,
+            cfg.in_queue,
+            out_queue,
+        )
+
+        def publish_out(payload: Dict[str, Any]) -> None:
+            out_ch.basic_publish(
+                exchange="",
+                routing_key=out_queue,  # IMPORTANT: resolved out_queue
+                body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            )
 
         def on_message(ch, method, props, body: bytes):
             global _last_result
@@ -142,10 +188,16 @@ def start_consumer(cfg: ConnectIn):
                             "lecture_id": cfg.lecture_id,
                             "request_id": request_id,
                             "person_id": person_id,
+                            "error": None,
                         }
 
                 with _last_result_lock:
                     _last_result = result
+
+                # -----------------------------
+                # ADDED: publish to OUT for Artem
+                # -----------------------------
+                publish_out(result)
 
                 log.info("[consumer] result %s", result)
 
@@ -158,6 +210,13 @@ def start_consumer(cfg: ConnectIn):
                 }
                 with _last_result_lock:
                     _last_result = err
+
+                # publish error тоже (чтобы Артём видел)
+                try:
+                    publish_out(err)
+                except Exception:
+                    log.exception("[consumer] failed to publish error to OUT")
+
                 log.exception("[consumer] error while processing message")
 
             finally:
@@ -169,8 +228,13 @@ def start_consumer(cfg: ConnectIn):
         while not _stop_event.is_set():
             in_conn.process_data_events(time_limit=1.0)
 
+        # graceful close
         try:
             in_conn.close()
+        except Exception:
+            pass
+        try:
+            out_conn.close()
         except Exception:
             pass
 
@@ -193,17 +257,27 @@ def connect(cfg: ConnectIn):
         if _state["running"]:
             return {"ok": False, "error": "already connected"}
 
-    # 1) Тестируем подключение к Rabbit Димы до старта треда
+    # ADDED: validate OUT env early, so /connect fails fast if missing
+    try:
+        out_amqp_url, out_queue = resolve_out_from_env()
+        _test_rabbit_connect(out_amqp_url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"cannot connect to OUT: {e}")
+
+    # 1) test IN
     try:
         _test_rabbit_connect(cfg.in_amqp_url)
     except Exception as e:
-        # Это та самая ситуация "Temporary failure in name resolution" и т.п.
         raise HTTPException(status_code=400, detail=f"cannot connect to in_amqp_url: {e}")
 
-    # 2) Стартуем consumer
     _worker_thread = threading.Thread(target=start_consumer, args=(cfg,), daemon=True)
     _worker_thread.start()
-    return {"ok": True, "lecture_id": cfg.lecture_id, "status": "connected"}
+    return {
+        "ok": True,
+        "lecture_id": cfg.lecture_id,
+        "status": "connected",
+        "out_queue": out_queue,
+    }
 
 @app.post("/disconnect")
 def disconnect():

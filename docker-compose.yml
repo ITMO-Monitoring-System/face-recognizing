@@ -35,6 +35,8 @@ services:
     ports:
       - "8180:8180"
     environment:
+      OUT_AMQP_URL: amqp://user:pass@rabbitmq:5672/
+      OUT_QUEUE: faces.recognition.out
       REDIS_URL: redis://redis:6379/0
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app
