@@ -207,8 +207,10 @@ def start_consumer(cfg: ConnectIn):
                     result = {
                         "lecture_id": lecture_id,
                         "request_id": request_id,
+                        "image_b64": image_b64,
                         "person_id": None,
-                        "error": "dataset_not_loaded",
+                        "error": None,
+                        "mode": "passthrough_no_dataset",
                     }
                 else:
                     faces = recognize_b64(
@@ -227,6 +229,7 @@ def start_consumer(cfg: ConnectIn):
                         "request_id": request_id,
                         "person_id": person_id,
                         "error": None,
+                        "mode": "recognize",
                     }
 
             with _last_result_lock:
