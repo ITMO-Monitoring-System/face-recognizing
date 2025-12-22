@@ -3,15 +3,14 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# системные зависимости:
-# - libgl1 + libglib2.0-0: чтобы OpenCV/GUI части не падали
-# - g++/build-essential: чтобы insightface мог собраться, если нет wheel
 RUN apt-get update -o Acquire::ForceIPv4=true -o Acquire::Retries=10 -o Acquire::http::Timeout=60 && \
     apt-get install -y --no-install-recommends \
         libgl1 \
         libglib2.0-0 \
         build-essential \
         g++ \
+        libstdc++6 \
+        gcc-12-base \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
