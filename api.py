@@ -7,6 +7,7 @@ from typing import Optional, List, Dict, Any, Tuple
 import pika
 import numpy as np
 import requests
+from fastapi import UploadFile, File
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -55,10 +56,10 @@ def drop_dataset(lecture_id: str):
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
 
 @app.post("/api/embedding", response_model=EmbeddingOut)
-async def embedding_from_bytes(request: Request):
-    img_bytes = await request.body()
+async def embedding_from_file(file: UploadFile = File(...)):
+    img_bytes = await file.read()
     if not img_bytes:
-        raise HTTPException(status_code=400, detail="empty body")
+        raise HTTPException(status_code=400, detail="empty file")
 
     face = best_embedding_bytes(img_bytes)
     if face is None:
@@ -67,7 +68,6 @@ async def embedding_from_bytes(request: Request):
     emb = face["embedding"].astype(np.float32).tolist()
     bbox = [float(x) for x in face["bbox"]]
 
-    # emb уже list[float] (через tolist), bbox тоже приводим к float
     return {"ok": True, "embedding": emb, "bbox": bbox}
 
 
