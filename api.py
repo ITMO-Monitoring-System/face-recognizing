@@ -8,6 +8,7 @@ import pika
 import numpy as np
 import requests
 from fastapi import UploadFile, File
+from fastapi import Request, UploadFile, HTTPException
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
@@ -56,8 +57,22 @@ def drop_dataset(lecture_id: str):
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
 
 @app.post("/api/embedding", response_model=EmbeddingOut)
-async def embedding_from_file(file: UploadFile = File(...)):
-    img_bytes = await file.read()
+async def embedding_from_multipart(request: Request):
+    form = await request.form()
+
+    # ожидаемые поля от Go-бэка
+    expected_keys = ["left_face", "right_face", "center_face"]
+
+    # берём, например, center_face (или любой другой по логике)
+    upload = form.get("center_face")
+
+    if not isinstance(upload, UploadFile):
+        raise HTTPException(
+            status_code=400,
+            detail="missing center_face file in multipart",
+        )
+
+    img_bytes = await upload.read()
     if not img_bytes:
         raise HTTPException(status_code=400, detail="empty file")
 
@@ -68,7 +83,11 @@ async def embedding_from_file(file: UploadFile = File(...)):
     emb = face["embedding"].astype(np.float32).tolist()
     bbox = [float(x) for x in face["bbox"]]
 
-    return {"ok": True, "embedding": emb, "bbox": bbox}
+    return {
+        "ok": True,
+        "embedding": emb,
+        "bbox": bbox,
+    }
 
 
 class OutCtx:
