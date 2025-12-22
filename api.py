@@ -105,14 +105,14 @@ class OutCtx:
 # Lecture control API (multi-queue)
 # -----------------------------
 class LectureStartIn(BaseModel):
-    lecture_id: str = Field(..., min_length=1)
+    lecture_id: int
     in_amqp_url: str = Field(..., min_length=1)
     in_queue: str = Field(..., min_length=1)
     threshold: float = 0.1
 
 
 class LectureStopIn(BaseModel):
-    lecture_id: str = Field(..., min_length=1)
+    lecture_id: int
 
 
 # -----------------------------
