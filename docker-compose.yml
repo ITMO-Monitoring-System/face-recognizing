@@ -39,7 +39,7 @@ services:
       OUT_AMQP_URL: amqp://user:pass@rabbitmq:5672/
       OUT_QUEUE_PREFIX: faces.recognition.out
 
-      BACKEND_URL: http://89.111.170.130:8000
+      BACKEND_URL: http://89.111.170.130:8080
       BACKEND_START_PATH: /api/lecture/start
       BACKEND_STOP_PATH: /api/lecture/stop
 
