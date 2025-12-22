@@ -4,6 +4,9 @@ import os
 import threading
 from typing import Optional, List, Dict, Any, Tuple
 
+import base64
+import cv2
+import logging
 import pika
 import numpy as np
 import requests
@@ -21,6 +24,19 @@ log = logging.getLogger("face-service")
 
 app = FastAPI()
 rdb = make_redis()
+
+log = logging.getLogger(__name__)
+def _strip_data_url(b64: str) -> str:
+    if "," in b64 and b64.strip().lower().startswith("data:"):
+        return b64.split(",", 1)[1]
+    return b64
+
+def _cos(a: np.ndarray, b: np.ndarray) -> float:
+    na = np.linalg.norm(a)
+    nb = np.linalg.norm(b)
+    if na == 0 or nb == 0:
+        return -1.0
+    return float(np.dot(a, b) / (na * nb))
 
 # -----------------------------
 # Dataset API
@@ -280,17 +296,56 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 
         def on_message(ch, method, props, body: bytes):
             lecture_id = rt.lecture_id
+            ctx = str(getattr(method, "delivery_tag", "na"))
             try:
                 msg = json.loads(body.decode("utf-8"))
                 image_b64 = msg.get("image_b64")
                 thr = float(msg.get("threshold", rt.threshold))
 
+                # logging
+                if not image_b64:
+                    log.warning("[lecture=%s ctx=%s] no image_b64 in message keys=%s", lecture_id, ctx,
+                                list(msg.keys()))
+                else:
+                    try:
+                        raw = base64.b64decode(_strip_data_url(image_b64), validate=False)
+                        arr = np.frombuffer(raw, dtype=np.uint8)
+                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if img is None:
+                            log.warning("[lecture=%s ctx=%s] imdecode=None raw_bytes=%s b64_len=%s",
+                                        lecture_id, ctx, len(raw), len(image_b64))
+                        else:
+                            h, w = img.shape[:2]
+                            log.info("[lecture=%s ctx=%s] img decoded %sx%s raw_bytes=%s b64_len=%s thr=%.4f",
+                                     lecture_id, ctx, w, h, len(raw), len(image_b64), thr)
+                    except Exception as e:
+                        log.exception("[lecture=%s ctx=%s] b64 decode failed: %s", lecture_id, ctx, e)
+
                 person_id = None
 
                 if image_b64:
                     persons = load_dataset(rdb, lecture_id)
+                    log.info("[lecture=%s ctx=%s] dataset loaded persons=%s", lecture_id, ctx,
+                             len(persons) if persons else 0)
+
                     if persons:
                         faces = recognize_b64(image_b64, persons, threshold=thr)
+                        log.info("[lecture=%s ctx=%s] recognize returned faces=%s", lecture_id, ctx,
+                                 len(faces) if faces else 0)
+
+
+                        if faces:
+
+                            brief = []
+                            for f in faces[:3]:
+                                brief.append({
+                                    "matched": f.get("matched"),
+                                    "person_id": f.get("person_id"),
+                                    "score": f.get("score") or f.get("similarity") or f.get("cosine"),
+                                    "det_score": f.get("det_score"),
+                                })
+                            log.info("[lecture=%s ctx=%s] recognize top=%s", lecture_id, ctx, brief)
+
                         for f in faces:
                             if f.get("matched"):
                                 person_id = f.get("person_id")
