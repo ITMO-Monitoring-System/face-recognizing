@@ -56,25 +56,14 @@ def drop_dataset(lecture_id: str):
     deleted = delete_dataset(rdb, lecture_id)
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
 
+from fastapi import Request, HTTPException
+
 @app.post("/api/embedding", response_model=EmbeddingOut)
-async def embedding_from_multipart(request: Request):
-    form = await request.form()
+async def embedding_from_bytes(request: Request):
+    img_bytes = await request.body()
 
-    # ожидаемые поля от Go-бэка
-    expected_keys = ["left_face", "right_face", "center_face"]
-
-    # берём, например, center_face (или любой другой по логике)
-    upload = form.get("center_face")
-
-    if not isinstance(upload, UploadFile):
-        raise HTTPException(
-            status_code=400,
-            detail="missing center_face file in multipart",
-        )
-
-    img_bytes = await upload.read()
     if not img_bytes:
-        raise HTTPException(status_code=400, detail="empty file")
+        raise HTTPException(status_code=400, detail="empty body")
 
     face = best_embedding_bytes(img_bytes)
     if face is None:
