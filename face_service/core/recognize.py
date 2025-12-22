@@ -60,3 +60,22 @@ def recognize_bytes(img_bytes: bytes, persons: dict[str, list[np.ndarray]], thre
 def recognize_b64(image_b64: str, persons: dict[str, list[np.ndarray]], threshold: float = 0.45):
     img_bytes = base64.b64decode(image_b64)
     return recognize_bytes(img_bytes, persons, threshold=threshold)
+
+def embeddings_bytes(img_bytes: bytes) -> list[dict[str, Any]]:
+    arr = np.frombuffer(img_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return []
+    return get_face_embeddings(img)
+
+
+def best_embedding_bytes(img_bytes: bytes) -> dict[str, Any] | None:
+    faces = embeddings_bytes(img_bytes)
+    if not faces:
+        return None
+
+    def area(face: dict[str, Any]) -> float:
+        x1, y1, x2, y2 = face["bbox"]
+        return float(max(0, x2 - x1) * max(0, y2 - y1))
+
+    return max(faces, key=area)

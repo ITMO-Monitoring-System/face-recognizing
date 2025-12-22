@@ -7,10 +7,11 @@ from typing import Optional, List, Dict, Any, Tuple
 import pika
 import numpy as np
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from face_service.core.recognize import recognize_b64
+from face_service.core.recognize import best_embedding_bytes
 from logic.dataset_store import make_redis, save_dataset, delete_dataset, load_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -31,6 +32,11 @@ class DatasetIn(BaseModel):
     lecture_id: str = Field(..., min_length=1)
     persons: List[PersonIn]
 
+class EmbeddingOut(BaseModel):
+    ok: bool
+    embedding: List[float]
+    bbox: Optional[List[float]] = None
+
 
 @app.post("/dataset")
 def set_dataset(payload: DatasetIn):
@@ -47,6 +53,27 @@ def set_dataset(payload: DatasetIn):
 def drop_dataset(lecture_id: str):
     deleted = delete_dataset(rdb, lecture_id)
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
+
+@app.post("/api/embedding", response_model=EmbeddingOut)
+async def embedding_from_bytes(request: Request):
+    """
+    Принимает сырые байты изображения (Content-Type: application/octet-stream)
+    и возвращает embedding (float32 -> JSON list[float]).
+    """
+    img_bytes = await request.body()
+    if not img_bytes:
+        raise HTTPException(status_code=400, detail="empty body")
+
+    face = best_embedding_bytes(img_bytes)
+    if face is None:
+        raise HTTPException(status_code=404, detail="no face detected")
+
+    emb = face["embedding"].astype(np.float32).tolist()
+    bbox = [float(x) for x in face["bbox"]]
+
+    # emb уже list[float] (через tolist), bbox тоже приводим к float
+    return {"ok": True, "embedding": emb, "bbox": bbox}
+
 
 class OutCtx:
     conn: Optional[pika.BlockingConnection] = None
