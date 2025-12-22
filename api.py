@@ -265,47 +265,27 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         notify_backend_start(rt.lecture_id, rt.out_queue)
 
         def on_message(ch, method, props, body: bytes):
-            lecture_id = rt.lecture_id  # ВАЖНО: фиксируем lecture_id из контекста, не из JSON.
+            lecture_id = rt.lecture_id
             try:
                 msg = json.loads(body.decode("utf-8"))
-                request_id = msg.get("request_id")
                 image_b64 = msg.get("image_b64")
                 thr = float(msg.get("threshold", rt.threshold))
 
-                if not request_id or not image_b64:
-                    result = {
-                        "lecture_id": lecture_id,
-                        "request_id": request_id,
-                        "person_id": None,
-                        "error": "bad_message",
-                    }
-                else:
+                person_id = None
+
+                if image_b64:
                     persons = load_dataset(rdb, lecture_id)
-                    if not persons:
-                        # Датасета нет -> пробрасываем изображение дальше без распознавания
-                        result = {
-                            "lecture_id": lecture_id,
-                            "request_id": request_id,
-                            "image_b64": image_b64,
-                            "person_id": None,
-                            "error": None,
-                            "mode": "passthrough_no_dataset",
-                        }
-                    else:
+                    if persons:
                         faces = recognize_b64(image_b64, persons, threshold=thr)
-                        person_id = None
                         for f in faces:
                             if f.get("matched"):
                                 person_id = f.get("person_id")
                                 break
 
-                        result = {
-                            "lecture_id": lecture_id,
-                            "request_id": request_id,
-                            "person_id": person_id,
-                            "error": None,
-                            "mode": "recognize",
-                        }
+                result = {
+                    "lecture_id": lecture_id,
+                    "person_id": person_id,
+                }
 
                 with _last_results_lock:
                     _last_results[lecture_id] = result
@@ -318,9 +298,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
             except Exception as e:
                 err = {
                     "lecture_id": lecture_id,
-                    "request_id": None,
                     "person_id": None,
-                    "error": str(e),
                 }
                 with _last_results_lock:
                     _last_results[lecture_id] = err
