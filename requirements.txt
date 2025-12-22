@@ -13,3 +13,4 @@ uvicorn
 
 redis
 requests
+python-multipart==0.0.9
