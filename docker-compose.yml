@@ -43,6 +43,8 @@ services:
       BACKEND_START_PATH: /api/lecture/start
       BACKEND_STOP_PATH: /api/lecture/stop
 
+      BACKEND_DATASET_PATH: /api/service/dataset
+
       REDIS_URL: redis://redis:6379/0
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: /app

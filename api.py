@@ -40,6 +40,14 @@ class EmbeddingOut(BaseModel):
     bbox: Optional[List[float]] = None
 
 
+
+def backend_dataset_url() -> Optional[str]:
+    base = os.getenv("BACKEND_URL")
+    path = os.getenv("BACKEND_DATASET_PATH", "/api/service/dataset")
+    if not base:
+        return None
+    return f"{base}{path}"
+
 @app.post("/dataset")
 def set_dataset(payload: DatasetIn):
     persons: Dict[str, List[np.ndarray]] = {}
@@ -353,7 +361,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 # -----------------------------
 @app.post("/api/lecture/start")
 def lecture_start(payload: LectureStartIn):
-    # OUT env + connectivity
+    # 1. Проверка OUT (куда публикуем результат)
     try:
         out_amqp_url = resolve_out_amqp_url_from_env()
         out_queue = resolve_out_queue_for_lecture(payload.lecture_id)
@@ -361,12 +369,49 @@ def lecture_start(payload: LectureStartIn):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"cannot connect to OUT: {e}")
 
-    # IN connectivity (RabbitMQ Димы)
+    # 2. Проверка IN (откуда читаем фотки)
     try:
         _test_rabbit_connect(payload.in_amqp_url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"cannot connect to in_amqp_url: {e}")
 
+    base, _, _ = backend_cfg()
+    if not base:
+        raise HTTPException(status_code=500, detail="BACKEND_URL is not configured")
+
+    try:
+        resp = requests.get(
+            f"{base}/api/service/dataset",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        dataset = resp.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"cannot fetch dataset from backend: {e}")
+
+    # 4. Кладём датасет в Redis
+    persons: Dict[str, List[np.ndarray]] = {}
+
+    for u in dataset.get("users_data", []):
+        uid = u["user_id"]
+        persons[uid] = []
+
+        if u.get("left_face_embedding"):
+            persons[uid].append(np.array(u["left_face_embedding"], dtype=np.float32))
+        if u.get("right_face_embedding"):
+            persons[uid].append(np.array(u["right_face_embedding"], dtype=np.float32))
+        if u.get("center_face_embedding"):
+            persons[uid].append(np.array(u["center_face_embedding"], dtype=np.float32))
+
+    save_dataset(rdb, payload.lecture_id, persons)
+
+    log.info(
+        "[lecture=%s] dataset loaded: %d persons",
+        payload.lecture_id,
+        len(persons),
+    )
+
+    # 5. Стартуем consumer
     with _lectures_lock:
         existing = _lectures.get(payload.lecture_id)
         if existing and existing.running:
@@ -386,12 +431,23 @@ def lecture_start(payload: LectureStartIn):
             out_queue=out_queue,
             threshold=payload.threshold,
         )
-        t = threading.Thread(target=run_lecture_consumer, args=(rt,), daemon=True)
+
+        t = threading.Thread(
+            target=run_lecture_consumer,
+            args=(rt,),
+            daemon=True,
+        )
         rt.thread = t
         _lectures[payload.lecture_id] = rt
         t.start()
 
-    return {"ok": True, "status": "started", "lecture_id": payload.lecture_id, "out_queue": out_queue}
+    return {
+        "ok": True,
+        "status": "started",
+        "lecture_id": payload.lecture_id,
+        "out_queue": out_queue,
+        "persons_loaded": len(persons),
+    }
 
 
 @app.post("/api/lecture/stop")
