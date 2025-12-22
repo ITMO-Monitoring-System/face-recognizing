@@ -9,7 +9,7 @@ def get_app() -> FaceAnalysis:
     global _app
     if _app is None:
         _app = FaceAnalysis(allowed_modules=["detection", "recognition"])
-        _app.prepare(ctx_id=-1, det_size=(640, 640))
+        _app.prepare(ctx_id=-1, det_size=(1024, 1024))
     return _app
 
 

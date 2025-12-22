@@ -324,7 +324,8 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 person_id = None
 
                 if image_b64:
-                    persons = load_dataset(rdb, lecture_id)
+                    # persons = load_dataset(rdb, lecture_id)
+                    persons = rt.dataset
                     log.info("[lecture=%s ctx=%s] dataset loaded persons=%s", lecture_id, ctx,
                              len(persons) if persons else 0)
 
