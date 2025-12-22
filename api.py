@@ -56,10 +56,6 @@ def drop_dataset(lecture_id: str):
 
 @app.post("/api/embedding", response_model=EmbeddingOut)
 async def embedding_from_bytes(request: Request):
-    """
-    Принимает сырые байты изображения (Content-Type: application/octet-stream)
-    и возвращает embedding (float32 -> JSON list[float]).
-    """
     img_bytes = await request.body()
     if not img_bytes:
         raise HTTPException(status_code=400, detail="empty body")
@@ -76,10 +72,18 @@ async def embedding_from_bytes(request: Request):
 
 
 class OutCtx:
-    conn: Optional[pika.BlockingConnection] = None
-    ch: Optional[pika.channel.Channel] = None
+    def __init__(self) -> None:
+        self.conn: Optional[pika.BlockingConnection] = None
+        self.ch: Optional[pika.channel.Channel] = None
 
-out = OutCtx()
+    def close(self) -> None:
+        try:
+            if self.conn and not self.conn.is_closed:
+                self.conn.close()
+        except Exception:
+            pass
+        self.conn = None
+        self.ch = None
 
 # -----------------------------
 # Lecture control API (multi-queue)
@@ -219,34 +223,28 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
     rt.running = True
 
     out_lock = threading.Lock()
-    out_conn: Optional[pika.BlockingConnection] = None
-    out_ch: Optional[pika.channel.Channel] = None
+    out_ctx = OutCtx()
 
     def ensure_out_ready() -> None:
-        nonlocal out_conn, out_ch
-        if out_conn and out_ch and not out_conn.is_closed:
+        if out_ctx.conn and out_ctx.ch and not out_ctx.conn.is_closed:
             return
-        out_conn = _make_blocking_conn(rt.out_amqp_url)
-        out_ch = out_conn.channel()
-        out_ch.queue_declare(queue=rt.out_queue, durable=True)
+
+        out_ctx.conn = _make_blocking_conn(rt.out_amqp_url)
+        out_ctx.ch = out_ctx.conn.channel()
+        out_ctx.ch.queue_declare(queue=rt.out_queue, durable=True)
 
     def publish_out(payload: Dict[str, Any]) -> bool:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         with out_lock:
             try:
                 ensure_out_ready()
-                assert out.ch is not None
-                out.ch.basic_publish(exchange="", routing_key=rt.out_queue, body=body)
+                assert out_ctx.ch is not None
+                out_ctx.ch.basic_publish(exchange="", routing_key=rt.out_queue, body=body)
                 return True
             except Exception as e:
                 rt.last_error = f"OUT publish failed: {e}"
                 log.warning("[lecture=%s] OUT publish failed: %s", rt.lecture_id, e)
-                try:
-                    if out.conn and not out.conn.is_closed:
-                        out.conn.close()
-                except Exception:
-                    pass
-                out_conn, out_ch = None, None
+                out_ctx.close()
                 return False
 
     try:
@@ -348,8 +346,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 
         try:
             with out_lock:
-                if out_conn and not out_conn.is_closed:
-                    out_conn.close()
+                out_ctx.close()
         except Exception:
             pass
 
