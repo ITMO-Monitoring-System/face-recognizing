@@ -17,7 +17,7 @@ def make_redis() -> redis.Redis:
     return redis.Redis.from_url(url, decode_responses=True)
 
 
-def key_persons(lecture_id: str) -> str:
+def key_persons(lecture_id: int | str) -> str:
     return f"persons:{lecture_id}"
 
 

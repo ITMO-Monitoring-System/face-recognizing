@@ -204,7 +204,7 @@ def _lecture_id_payload_value(lecture_id: str) -> Any:
     return int(lecture_id) if lecture_id.isdigit() else lecture_id
 
 
-def notify_backend_start(lecture_id: str, out_queue: str) -> None:
+def notify_backend_start(lecture_id:int, out_queue: str) -> None:
     base, start_path, _ = backend_cfg()
     if not base:
         return
@@ -218,7 +218,7 @@ def notify_backend_start(lecture_id: str, out_queue: str) -> None:
         log.warning("[lecture=%s] backend start notify failed: %s", lecture_id, e)
 
 
-def notify_backend_stop(lecture_id: str, out_queue: str) -> None:
+def notify_backend_stop(lecture_id: int, out_queue: str) -> None:
     base, _, stop_path = backend_cfg()
     if not base:
         return
