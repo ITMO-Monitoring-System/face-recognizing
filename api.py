@@ -3,7 +3,7 @@ import logging
 import os
 import threading
 from typing import Optional, List, Dict, Any, Tuple
-
+from insightface.app import FaceAnalysis
 import pika
 import numpy as np
 import requests
@@ -21,6 +21,11 @@ log = logging.getLogger("face-service")
 
 app = FastAPI()
 rdb = make_redis()
+
+face_app = FaceAnalysis(
+    allowed_modules=["detection", "recognition"]
+)
+face_app.prepare(ctx_id=-1, det_size=(640, 640))
 
 # -----------------------------
 # Dataset API
@@ -65,7 +70,8 @@ async def embedding_from_bytes(request: Request):
     if not img_bytes:
         raise HTTPException(status_code=400, detail="empty body")
 
-    face = best_embedding_bytes(img_bytes)
+    face = best_embedding_bytes(img_bytes, face_app)
+
     if face is None:
         raise HTTPException(status_code=404, detail="no face detected")
 

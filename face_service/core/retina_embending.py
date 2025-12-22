@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+from typing import Any
 from insightface.app import FaceAnalysis
 
 _app: FaceAnalysis | None = None
@@ -13,13 +14,18 @@ def get_app() -> FaceAnalysis:
     return _app
 
 
-def get_face_embeddings(img_bgr: np.ndarray):
-    app = get_app()
-    faces = app.get(img_bgr)
-    out = []
+def get_face_embeddings(
+    img_bgr: np.ndarray,
+    face_app,
+) -> list[dict[str, Any]]:
+
+    faces = face_app.get(img_bgr)
+    result = []
+
     for f in faces:
-        emb = f.normed_embedding.astype(np.float32)
-        bbox = f.bbox.astype(int).tolist()
-        kps = f.kps.astype(float).tolist()
-        out.append({"embedding": emb, "bbox": bbox, "kps": kps, "det_score": float(f.det_score)})
-    return out
+        result.append({
+            "embedding": f.embedding,
+            "bbox": f.bbox.tolist(),
+        })
+
+    return result
