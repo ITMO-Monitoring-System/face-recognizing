@@ -124,7 +124,7 @@ _lectures_lock = threading.Lock()
 class LectureRuntime:
     def __init__(
         self,
-        lecture_id: str,
+        lecture_id: int,
         in_amqp_url: str,
         in_queue: str,
         out_amqp_url: str,
@@ -197,11 +197,9 @@ def backend_cfg() -> Tuple[Optional[str], str, str]:
     return base, start_path, stop_path
 
 
-def _lecture_id_payload_value(lecture_id: str) -> Any:
-    # У Артёма в swagger пример lecture_id как число.
-    # Если у вас lecture_id всегда числовой — уйдет int.
-    # Если нет — уйдет строка (не сломает ваш сервис, если он типизирует как string).
-    return int(lecture_id) if lecture_id.isdigit() else lecture_id
+def _lecture_id_payload_value(lecture_id: int) -> int:
+    return lecture_id
+
 
 
 def notify_backend_start(lecture_id:int, out_queue: str) -> None:

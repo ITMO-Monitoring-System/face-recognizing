@@ -18,7 +18,7 @@ def make_redis() -> redis.Redis:
 
 
 def key_persons(lecture_id: int | str) -> str:
-    return f"persons:{lecture_id}"
+    return f"persons:{int(lecture_id)}"
 
 
 def save_dataset(r: redis.Redis, lecture_id: str, persons: Dict[str, List[np.ndarray]]) -> None:
