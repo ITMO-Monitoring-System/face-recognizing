@@ -47,7 +47,7 @@ class PersonIn(BaseModel):
 
 
 class DatasetIn(BaseModel):
-    lecture_id: str = Field(..., min_length=1)
+    lecture_id: int = Field(..., min_length=1)
     persons: List[PersonIn]
 
 class EmbeddingOut(BaseModel):
@@ -76,7 +76,7 @@ def set_dataset(payload: DatasetIn):
 
 
 @app.delete("/dataset/{lecture_id}")
-def drop_dataset(lecture_id: str):
+def drop_dataset(lecture_id: int):
     deleted = delete_dataset(rdb, lecture_id)
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
 
@@ -162,10 +162,10 @@ class LectureRuntime:
         self.last_error: Optional[str] = None
 
 
-_lectures: Dict[str, LectureRuntime] = {}
+_lectures: Dict[int, LectureRuntime] = {}
 
 _last_results_lock = threading.Lock()
-_last_results: Dict[str, Dict[str, Any]] = {}  # lecture_id -> last result
+_last_results: Dict[int, Dict[str, Any]] = {}  # lecture_id -> last result
 
 
 # -----------------------------
@@ -199,7 +199,7 @@ def resolve_out_amqp_url_from_env() -> str:
     return out_amqp_url
 
 
-def resolve_out_queue_for_lecture(lecture_id: str) -> str:
+def resolve_out_queue_for_lecture(lecture_id: int) -> str:
     prefix = os.getenv("OUT_QUEUE_PREFIX")
     if not prefix:
         raise ValueError("OUT_QUEUE_PREFIX is not configured")
@@ -263,17 +263,44 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         out_ctx.ch = out_ctx.conn.channel()
         out_ctx.ch.queue_declare(queue=rt.out_queue, durable=True)
 
+    log.info(
+        "[lecture=%s] OUT queue ready: amqp=%s queue=%s",
+        rt.lecture_id,
+        rt.out_amqp_url,
+        rt.out_queue,
+    )
+
     def publish_out(payload: Dict[str, Any]) -> bool:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
         with out_lock:
             try:
                 ensure_out_ready()
                 assert out_ctx.ch is not None
-                out_ctx.ch.basic_publish(exchange="", routing_key=rt.out_queue, body=body)
+
+                out_ctx.ch.basic_publish(
+                    exchange="",
+                    routing_key=rt.out_queue,
+                    body=body,
+                )
+
+                log.info(
+                    "[lecture=%s] OUT publish OK queue=%s bytes=%d",
+                    rt.lecture_id,
+                    rt.out_queue,
+                    len(body),
+                )
+
                 return True
+
             except Exception as e:
                 rt.last_error = f"OUT publish failed: {e}"
-                log.warning("[lecture=%s] OUT publish failed: %s", rt.lecture_id, e)
+                log.error(
+                    "[lecture=%s] OUT publish FAILED queue=%s err=%r",
+                    rt.lecture_id,
+                    rt.out_queue,
+                    e,
+                )
                 out_ctx.close()
                 return False
 
@@ -550,7 +577,7 @@ def lecture_status():
 
 
 @app.get("/api/lecture/last_result/{lecture_id}")
-def lecture_last_result(lecture_id: str):
+def lecture_last_result(lecture_id: int):
     with _last_results_lock:
         return {"ok": True, "lecture_id": lecture_id, "result": _last_results.get(lecture_id)}
 

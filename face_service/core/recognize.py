@@ -59,10 +59,18 @@ def recognize_bytes(img_bytes: bytes, persons: dict[str, list[np.ndarray]], thre
 
     h, w = img.shape[:2]
 
+
     # 1) базовый upscale для маленьких кадров (поднимает шанс детекта)
     scale = 1.0
-    if min(w, h) < 600:
+    m = min(w, h)
+    if m < 160:
+        scale = 8.0
+    elif m < 300:
+        scale = 4.0
+    elif m < 600:
         scale = 2.0
+
+    if scale != 1.0:
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
     res = recognize_bgr(img, persons, threshold=threshold)

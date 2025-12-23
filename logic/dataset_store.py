@@ -21,13 +21,12 @@ def key_persons(lecture_id: int | str) -> str:
     return f"persons:{int(lecture_id)}"
 
 
-def save_dataset(r: redis.Redis, lecture_id: str, persons: Dict[str, List[np.ndarray]]) -> None:
-    # сериализуем np.ndarray -> list[float]
+def save_dataset(r: redis.Redis, lecture_id: int, persons: Dict[str, List[np.ndarray]]) -> None:
     raw = {pid: [emb.astype(float).tolist() for emb in embs] for pid, embs in persons.items()}
     r.set(key_persons(lecture_id), json.dumps(raw, ensure_ascii=False))
 
 
-def load_dataset(r: redis.Redis, lecture_id: str) -> Optional[Dict[str, List[np.ndarray]]]:
+def load_dataset(r: redis.Redis, lecture_id: int) -> Optional[Dict[str, List[np.ndarray]]]:
     s = r.get(key_persons(lecture_id))
     if not s:
         return None
@@ -38,5 +37,5 @@ def load_dataset(r: redis.Redis, lecture_id: str) -> Optional[Dict[str, List[np.
     return persons
 
 
-def delete_dataset(r: redis.Redis, lecture_id: str) -> bool:
+def delete_dataset(r: redis.Redis, lecture_id: int) -> bool:
     return bool(r.delete(key_persons(lecture_id)))
