@@ -1,0 +1,57 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${RABBITMQ_BIND_PORT:-15572}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_BIND_PORT:-25672}:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-user}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-pass}
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${REDIS_BIND_PORT:-16379}:6379"
+
+  model-preload:
+    build:
+      context: .
+    environment:
+      NO_ALBUMENTATIONS_UPDATE: "1"
+    working_dir: /app
+    volumes:
+      - ${INSIGHTFACE_PATH:-/opt/fizon/insightface}:/root/.insightface
+    entrypoint: ["/bin/sh", "-lc"]
+    command: >
+      python -c "from insightface.app import FaceAnalysis; app=FaceAnalysis(allowed_modules=['detection','recognition']); app.prepare(ctx_id=-1, det_size=(640,640)); print('model ready')"
+    restart: "no"
+
+  face-service:
+    build:
+      context: .
+    depends_on:
+      - rabbitmq
+      - redis
+      - model-preload
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_BIND_PORT:-18083}:8180"
+    environment:
+      OUT_AMQP_URL: amqp://${RABBITMQ_USER:-user}:${RABBITMQ_PASSWORD:-pass}@rabbitmq:5672/
+      OUT_QUEUE_PREFIX: ${OUT_QUEUE_PREFIX:-faces.recognition.out}
+
+      BACKEND_URL: ${BACKEND_URL:-http://89.111.170.130:8080}
+      BACKEND_START_PATH: ${BACKEND_START_PATH:-/api/lecture/start}
+      BACKEND_STOP_PATH: ${BACKEND_STOP_PATH:-/api/lecture/stop}
+      BACKEND_DATASET_PATH: ${BACKEND_DATASET_PATH:-/api/service/dataset}
+
+      REDIS_URL: redis://redis:6379/0
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+      NO_ALBUMENTATIONS_UPDATE: "1"
+    command: ["python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8180", "--log-level", "info"]
+    volumes:
+      - ${INSIGHTFACE_PATH:-/opt/fizon/insightface}:/root/.insightface
+    working_dir: /app

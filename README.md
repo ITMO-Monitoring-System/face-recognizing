@@ -1,5 +1,19 @@
 # Face Recognition Service - Документация
 
+## Deploy (ветка OneFace)
+
+Автодеплой настроен через `.github/workflows/deploy.yml` и запускается по `push` в ветку `OneFace`.
+
+Нужные GitHub secrets:
+- `DEPLOY_HOST` (или `SSH_HOST`)
+- `DEPLOY_PORT` (или `SSH_PORT`, по умолчанию `22`)
+- `DEPLOY_USERNAME` (или `SSH_USERNAME`)
+- `DEPLOY_SSH_PRIVATE_KEY` (или `SSH_PRIVATE_KEY`)
+- `DEPLOY_PATH` (опционально, по умолчанию `/opt/fizon/face-recognizing`)
+- `APP_ENV_FILE` (опционально, содержимое `.env.production`)
+
+Прод-compose: `docker-compose.prod.yml`
+
 ## Назначение сервиса
 Система для распознавания лиц. Сервис может:
 - Сохранять эмбеддинги лиц студентов (по лекциям)
