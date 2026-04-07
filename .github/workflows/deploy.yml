@@ -16,7 +16,6 @@ jobs:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || secrets.SSH_HOST }}
       DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || secrets.SSH_PORT }}
       DEPLOY_USERNAME: ${{ secrets.DEPLOY_USERNAME || secrets.SSH_USERNAME }}
-      DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY || secrets.SSH_PRIVATE_KEY }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/fizon/face-recognizing' }}
       APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
 
@@ -29,12 +28,14 @@ jobs:
           set -Eeuo pipefail
           if [ -n "${APP_ENV_FILE:-}" ]; then
             printf '%s\n' "${APP_ENV_FILE}" > .env.production
+          else
+            echo "APP_ENV_FILE is not set, keeping server-side .env.production"
           fi
 
       - name: Setup SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
-          ssh-private-key: ${{ env.DEPLOY_SSH_PRIVATE_KEY }}
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY || secrets.SSH_PRIVATE_KEY }}
 
       - name: Deploy to server
         run: |
@@ -53,9 +54,11 @@ jobs:
           rsync -az --delete \
             --exclude ".git" \
             --exclude ".github" \
+            --exclude ".codex" \
             --exclude "__pycache__" \
             --exclude ".pytest_cache" \
             --exclude ".venv" \
+            --exclude ".env.production" \
             -e "ssh -p ${DEPLOY_PORT}" \
             ./ "${REMOTE}:${DEPLOY_PATH}/"
 
