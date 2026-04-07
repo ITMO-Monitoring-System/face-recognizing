@@ -18,9 +18,6 @@ jobs:
       DEPLOY_USERNAME: ${{ secrets.DEPLOY_USERNAME || secrets.SSH_USERNAME }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/fizon/face-recognizing' }}
       APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
-      DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
-      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-      DEPLOY_PASSWORD: ${{ secrets.DEPLOY_PASSWORD || secrets.SSH_PASSWORD }}
 
     steps:
       - name: Checkout repository
@@ -35,50 +32,10 @@ jobs:
             echo "APP_ENV_FILE is not set, keeping server-side .env.production"
           fi
 
-      - name: Setup SSH auth
-        run: |
-          set -Eeuo pipefail
-
-          KEY_VALUE="${DEPLOY_SSH_PRIVATE_KEY:-${SSH_PRIVATE_KEY:-}}"
-          AUTH_MODE=""
-          mkdir -p ~/.ssh
-
-          if [ -n "${KEY_VALUE}" ]; then
-            KEY_VALUE="$(printf '%s' "${KEY_VALUE}" | tr -d '\r')"
-            KEY_VALUE="${KEY_VALUE#\"}"
-            KEY_VALUE="${KEY_VALUE%\"}"
-            KEY_VALUE="${KEY_VALUE#\'}"
-            KEY_VALUE="${KEY_VALUE%\'}"
-
-            printf '%b' "${KEY_VALUE}" > ~/.ssh/deploy_key
-            chmod 600 ~/.ssh/deploy_key
-
-            if ! ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
-              if printf '%s' "${KEY_VALUE}" | tr -d '\n ' | base64 -d > ~/.ssh/deploy_key 2>/dev/null; then
-                chmod 600 ~/.ssh/deploy_key
-              fi
-            fi
-
-            if ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
-              AUTH_MODE="key"
-              echo "AUTH_MODE=key" >> "$GITHUB_ENV"
-              echo "SSH_KEY_PATH=$HOME/.ssh/deploy_key" >> "$GITHUB_ENV"
-            else
-              echo "SSH key secret is present but invalid, trying password fallback if configured."
-            fi
-          fi
-
-          if [ -z "${AUTH_MODE}" ] && [ -n "${DEPLOY_PASSWORD:-}" ]; then
-            sudo apt-get update
-            sudo apt-get install -y sshpass
-            AUTH_MODE="password"
-            echo "AUTH_MODE=password" >> "$GITHUB_ENV"
-          fi
-
-          if [ -z "${AUTH_MODE}" ]; then
-            echo "No valid SSH auth configured. Set valid DEPLOY_SSH_PRIVATE_KEY/SSH_PRIVATE_KEY or DEPLOY_PASSWORD/SSH_PASSWORD."
-            exit 1
-          fi
+      - name: Setup SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
 
       - name: Deploy to server
         run: |
@@ -92,18 +49,7 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p "${DEPLOY_PORT}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
-          if [ "${AUTH_MODE:-}" = "password" ]; then
-            : "${DEPLOY_PASSWORD:?Missing DEPLOY_PASSWORD (or SSH_PASSWORD) secret}"
-            export SSHPASS="${DEPLOY_PASSWORD}"
-            SSH_PREFIX=(sshpass -e ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p "${DEPLOY_PORT}")
-            RSYNC_SSH="sshpass -e ssh -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p ${DEPLOY_PORT}"
-          else
-            SSH_KEY_PATH="${SSH_KEY_PATH:-$HOME/.ssh/deploy_key}"
-            SSH_PREFIX=(ssh -i "${SSH_KEY_PATH}" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p "${DEPLOY_PORT}")
-            RSYNC_SSH="ssh -i ${SSH_KEY_PATH} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p ${DEPLOY_PORT}"
-          fi
-
-          "${SSH_PREFIX[@]}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}'"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}'"
 
           rsync -az --delete \
             --exclude ".git" \
@@ -113,10 +59,10 @@ jobs:
             --exclude ".pytest_cache" \
             --exclude ".venv" \
             --exclude ".env.production" \
-            -e "${RSYNC_SSH}" \
+            -e "ssh -p ${DEPLOY_PORT}" \
             ./ "${REMOTE}:${DEPLOY_PATH}/"
 
-          "${SSH_PREFIX[@]}" "${REMOTE}" <<EOSSH
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" <<EOSSH
             set -Eeuo pipefail
             cd "${DEPLOY_PATH}"
 
