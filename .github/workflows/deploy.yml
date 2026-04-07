@@ -18,6 +18,8 @@ jobs:
       DEPLOY_USERNAME: ${{ secrets.DEPLOY_USERNAME || secrets.SSH_USERNAME }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/fizon/face-recognizing' }}
       APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
+      DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
 
     steps:
       - name: Checkout repository
@@ -32,10 +34,26 @@ jobs:
             echo "APP_ENV_FILE is not set, keeping server-side .env.production"
           fi
 
-      - name: Setup SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY || secrets.SSH_PRIVATE_KEY }}
+      - name: Setup SSH key
+        run: |
+          set -Eeuo pipefail
+
+          KEY_VALUE="${DEPLOY_SSH_PRIVATE_KEY:-${SSH_PRIVATE_KEY:-}}"
+          if [ -z "${KEY_VALUE}" ]; then
+            echo "Missing SSH private key secret. Set DEPLOY_SSH_PRIVATE_KEY or SSH_PRIVATE_KEY."
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          printf '%s' "${KEY_VALUE}" | tr -d '\r' > ~/.ssh/deploy_key
+
+          if grep -q '\\n' ~/.ssh/deploy_key; then
+            perl -0777 -pe 's/\\n/\n/g' ~/.ssh/deploy_key > ~/.ssh/deploy_key.tmp
+            mv ~/.ssh/deploy_key.tmp ~/.ssh/deploy_key
+          fi
+
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
 
       - name: Deploy to server
         run: |
@@ -45,11 +63,13 @@ jobs:
           : "${DEPLOY_USERNAME:?Missing DEPLOY_USERNAME (or SSH_USERNAME) secret}"
           DEPLOY_PORT="${DEPLOY_PORT:-22}"
           REMOTE="${DEPLOY_USERNAME}@${DEPLOY_HOST}"
+          SSH_KEY_PATH="$HOME/.ssh/deploy_key"
+          SSH_OPTS="-i ${SSH_KEY_PATH} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p ${DEPLOY_PORT}"
 
           mkdir -p ~/.ssh
           ssh-keyscan -p "${DEPLOY_PORT}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}'"
+          ssh ${SSH_OPTS} "${REMOTE}" "mkdir -p '${DEPLOY_PATH}'"
 
           rsync -az --delete \
             --exclude ".git" \
@@ -59,10 +79,10 @@ jobs:
             --exclude ".pytest_cache" \
             --exclude ".venv" \
             --exclude ".env.production" \
-            -e "ssh -p ${DEPLOY_PORT}" \
+            -e "ssh -i ${SSH_KEY_PATH} -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p ${DEPLOY_PORT}" \
             ./ "${REMOTE}:${DEPLOY_PATH}/"
 
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" <<EOSSH
+          ssh ${SSH_OPTS} "${REMOTE}" <<EOSSH
             set -Eeuo pipefail
             cd "${DEPLOY_PATH}"
 
