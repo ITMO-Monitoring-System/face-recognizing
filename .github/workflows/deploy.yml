@@ -45,15 +45,25 @@ jobs:
           fi
 
           mkdir -p ~/.ssh
-          printf '%s' "${KEY_VALUE}" | tr -d '\r' > ~/.ssh/deploy_key
+          KEY_VALUE="$(printf '%s' "${KEY_VALUE}" | tr -d '\r')"
+          KEY_VALUE="${KEY_VALUE#\"}"
+          KEY_VALUE="${KEY_VALUE%\"}"
+          KEY_VALUE="${KEY_VALUE#\'}"
+          KEY_VALUE="${KEY_VALUE%\'}"
 
-          if grep -q '\\n' ~/.ssh/deploy_key; then
-            perl -0777 -pe 's/\\n/\n/g' ~/.ssh/deploy_key > ~/.ssh/deploy_key.tmp
-            mv ~/.ssh/deploy_key.tmp ~/.ssh/deploy_key
+          printf '%b' "${KEY_VALUE}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
+            if printf '%s' "${KEY_VALUE}" | tr -d '\n ' | base64 -d > ~/.ssh/deploy_key 2>/dev/null; then
+              chmod 600 ~/.ssh/deploy_key
+            fi
           fi
 
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null 2>&1; then
+            echo "Invalid SSH key format. Use raw private key text or base64-encoded private key."
+            exit 1
+          fi
 
       - name: Deploy to server
         run: |
