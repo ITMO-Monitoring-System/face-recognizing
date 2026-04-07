@@ -76,7 +76,7 @@ jobs:
               COMPOSE_ENV_ARGS="--env-file .env.production"
             fi
 
-            docker compose ${COMPOSE_ENV_ARGS} -f docker-compose.prod.yml up -d --build --remove-orphans
-            docker compose ${COMPOSE_ENV_ARGS} -f docker-compose.prod.yml ps
+            docker compose \${COMPOSE_ENV_ARGS} -f docker-compose.prod.yml up -d --build --remove-orphans
+            docker compose \${COMPOSE_ENV_ARGS} -f docker-compose.prod.yml ps
             docker image prune -f
           EOSSH
