@@ -55,3 +55,11 @@ services:
     volumes:
       - ${INSIGHTFACE_PATH:-/opt/fizon/insightface}:/root/.insightface
     working_dir: /app
+    networks:
+      - default
+      - face_tracking
+
+networks:
+  face_tracking:
+    external: true
+    name: face-tracking_default
