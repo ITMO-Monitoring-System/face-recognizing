@@ -471,9 +471,23 @@ def lecture_start(payload: LectureStartIn):
 
     # 4. Кладём датасет в Redis
     persons: Dict[str, List[np.ndarray]] = {}
+    if not isinstance(dataset, dict):
+        raise HTTPException(status_code=500, detail="invalid dataset payload")
 
-    for u in dataset.get("users_data", []):
-        uid = u["user_id"]
+    users_data = dataset.get("users_data")
+    if users_data is None and isinstance(dataset.get("data"), dict):
+        users_data = dataset["data"].get("users_data")
+    if users_data is None:
+        users_data = []
+    if not isinstance(users_data, list):
+        raise HTTPException(status_code=500, detail="invalid dataset format: users_data must be list")
+
+    for u in users_data:
+        if not isinstance(u, dict):
+            continue
+        uid = str(u.get("user_id", "")).strip()
+        if not uid:
+            continue
         persons[uid] = []
 
         if u.get("left_face_embedding"):
