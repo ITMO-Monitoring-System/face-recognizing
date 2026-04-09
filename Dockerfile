@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1.6
-FROM python:3.11-slim-bookworm
+# Previous working base:
+# FROM python:3.11-slim-bookworm
+FROM python:3.11-slim-trixie
 
 WORKDIR /app
 
@@ -8,9 +10,12 @@ RUN apt-get update -o Acquire::ForceIPv4=true -o Acquire::Retries=10 -o Acquire:
         libgl1 \
         libglib2.0-0 \
         build-essential \
+        # Previous package set:
+        # g++ \
+        # libstdc++6 \
+        # gcc-12-base \
         g++ \
         libstdc++6 \
-        gcc-12-base \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

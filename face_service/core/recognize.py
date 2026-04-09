@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import base64
+import logging
+import os
 from pathlib import Path
 from typing import Any
-import base64
 
-import logging
-import numpy as np
 import cv2
+import numpy as np
 
 from .retina_embending import get_face_embeddings
 
 log = logging.getLogger(__name__)
+DEFAULT_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.55"))
 
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     a = a / (np.linalg.norm(a) + 1e-9)
@@ -18,7 +20,11 @@ def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     return float(a @ b)
 
 
-def recognize_bgr(img_bgr: np.ndarray, persons: dict[str, list[np.ndarray]], threshold: float = 0.3) -> list[dict[str, Any]]:
+def recognize_bgr(
+    img_bgr: np.ndarray,
+    persons: dict[str, list[np.ndarray]],
+    threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
+) -> list[dict[str, Any]]:
     faces = get_face_embeddings(img_bgr)
     if not faces:
         return []
@@ -34,24 +40,36 @@ def recognize_bgr(img_bgr: np.ndarray, persons: dict[str, list[np.ndarray]], thr
                 best_id, best_score = pid, score
 
         match = best_score >= threshold
-        results.append({
-            "bbox": face["bbox"],
-            "person_id": best_id if match else None,
-            "score": round(best_score, 4),
-            "matched": match,
-        })
+        results.append(
+            {
+                "bbox": face["bbox"],
+                "person_id": best_id if match else None,
+                "confidence": round(best_score, 4),
+                "score": round(best_score, 4),
+                "matched": match,
+                "det_score": round(float(face.get("det_score", 0.0)), 4),
+            }
+        )
 
     return results
 
 
-def recognize_image(image_path: str | Path, persons: dict[str, list[np.ndarray]], threshold: float = 0.3):
+def recognize_image(
+    image_path: str | Path,
+    persons: dict[str, list[np.ndarray]],
+    threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
+) -> list[dict[str, Any]]:
     img = cv2.imread(str(image_path))
     if img is None:
         return []
     return recognize_bgr(img, persons, threshold=threshold)
 
 
-def recognize_bytes(img_bytes: bytes, persons: dict[str, list[np.ndarray]], threshold: float = 0.3):
+def recognize_bytes(
+    img_bytes: bytes,
+    persons: dict[str, list[np.ndarray]],
+    threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
+) -> list[dict[str, Any]]:
     arr = np.frombuffer(img_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
@@ -62,12 +80,12 @@ def recognize_bytes(img_bytes: bytes, persons: dict[str, list[np.ndarray]], thre
 
     # 1) базовый upscale для маленьких кадров (поднимает шанс детекта)
     scale = 1.0
-    m = min(w, h)
-    if m < 160:
+    min_side = min(w, h)
+    if min_side < 160:
         scale = 8.0
-    elif m < 300:
+    elif min_side < 300:
         scale = 4.0
-    elif m < 600:
+    elif min_side < 600:
         scale = 2.0
 
     if scale != 1.0:
@@ -77,7 +95,7 @@ def recognize_bytes(img_bytes: bytes, persons: dict[str, list[np.ndarray]], thre
 
     # 2) fallback retry: если не нашли лицо и исходник был маленький — пробуем ещё сильнее
     # (иногда 4x даёт детект там, где 2x не даёт)
-    if not res and min(w, h) < 600 and scale < 4.0:
+    if not res and min_side < 600 and scale < 4.0:
         img2 = cv2.resize(img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)  # итого 4x от исходника
         res = recognize_bgr(img2, persons, threshold=threshold)
 
@@ -91,7 +109,11 @@ def recognize_bytes(img_bytes: bytes, persons: dict[str, list[np.ndarray]], thre
 
 
 
-def recognize_b64(image_b64: str, persons: dict[str, list[np.ndarray]], threshold: float = 0.3):
+def recognize_b64(
+    image_b64: str,
+    persons: dict[str, list[np.ndarray]],
+    threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
+) -> list[dict[str, Any]]:
     if image_b64 and image_b64.strip().lower().startswith("data:"):
         image_b64 = image_b64.split(",", 1)[1]  # убрать "data:image/...;base64,"
     img_bytes = base64.b64decode(image_b64, validate=False)

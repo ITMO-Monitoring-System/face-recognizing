@@ -1,23 +1,23 @@
+import base64
 import json
 import logging
 import os
 import threading
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import base64
 import cv2
-import logging
-import pika
 import numpy as np
+import pika
 import requests
-from fastapi import UploadFile, File
-from fastapi import Request, UploadFile, HTTPException
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from face_service.core.recognize import recognize_b64
-from face_service.core.recognize import best_embedding_bytes
-from logic.dataset_store import make_redis, save_dataset, delete_dataset, load_dataset
+from face_service.core.recognize import (
+    DEFAULT_RECOGNITION_THRESHOLD,
+    best_embedding_bytes,
+    recognize_b64,
+)
+from logic.dataset_store import delete_dataset, load_dataset, make_redis, save_dataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("face-service")
@@ -26,17 +26,12 @@ app = FastAPI()
 rdb = make_redis()
 
 log = logging.getLogger(__name__)
+
+
 def _strip_data_url(b64: str) -> str:
     if "," in b64 and b64.strip().lower().startswith("data:"):
         return b64.split(",", 1)[1]
     return b64
-
-def _cos(a: np.ndarray, b: np.ndarray) -> float:
-    na = np.linalg.norm(a)
-    nb = np.linalg.norm(b)
-    if na == 0 or nb == 0:
-        return -1.0
-    return float(np.dot(a, b) / (na * nb))
 
 # -----------------------------
 # Dataset API
@@ -50,11 +45,11 @@ class DatasetIn(BaseModel):
     lecture_id: int = Field(..., min_length=1)
     persons: List[PersonIn]
 
+
 class EmbeddingOut(BaseModel):
     ok: bool
     embedding: List[float]
     bbox: Optional[List[float]] = None
-
 
 
 def backend_dataset_url() -> Optional[str]:
@@ -63,6 +58,7 @@ def backend_dataset_url() -> Optional[str]:
     if not base:
         return None
     return f"{base}{path}"
+
 
 @app.post("/dataset")
 def set_dataset(payload: DatasetIn):
@@ -79,8 +75,6 @@ def set_dataset(payload: DatasetIn):
 def drop_dataset(lecture_id: int):
     deleted = delete_dataset(rdb, lecture_id)
     return {"ok": True, "lecture_id": lecture_id, "deleted": deleted}
-
-from fastapi import Request, HTTPException
 
 @app.post("/api/embedding", response_model=EmbeddingOut)
 async def embedding_from_bytes(request: Request):
@@ -124,7 +118,7 @@ class LectureStartIn(BaseModel):
     lecture_id: int
     in_amqp_url: str = Field(..., min_length=1)
     in_queue: str = Field(..., min_length=1)
-    threshold: float = 0.1
+    threshold: float = DEFAULT_RECOGNITION_THRESHOLD
 
 
 class LectureStopIn(BaseModel):
@@ -217,8 +211,14 @@ def _lecture_id_payload_value(lecture_id: int) -> int:
     return lecture_id
 
 
+def _pick_best_match(faces: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    matched_faces = [face for face in faces if face.get("matched")]
+    if not matched_faces:
+        return None
+    return max(matched_faces, key=lambda face: float(face.get("confidence") or face.get("score") or -1.0))
 
-def notify_backend_start(lecture_id:int, out_queue: str) -> None:
+
+def notify_backend_start(lecture_id: int, out_queue: str) -> None:
     base, start_path, _ = backend_cfg()
     if not base:
         return
@@ -257,11 +257,14 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 
     def ensure_out_ready() -> None:
         if out_ctx.conn and out_ctx.ch and not out_ctx.conn.is_closed:
+            log.debug("[lecture=%s] OUT reuse existing connection", rt.lecture_id)
             return
 
+        log.info("[lecture=%s] OUT creating connection to %s", rt.lecture_id, rt.out_amqp_url)
         out_ctx.conn = _make_blocking_conn(rt.out_amqp_url)
         out_ctx.ch = out_ctx.conn.channel()
         out_ctx.ch.queue_declare(queue=rt.out_queue, durable=True)
+        log.info("[lecture=%s] OUT declared queue=%s", rt.lecture_id, rt.out_queue)
 
     log.info(
         "[lecture=%s] OUT queue ready: amqp=%s queue=%s",
@@ -373,10 +376,9 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                                 })
                             log.info("[lecture=%s ctx=%s] recognize top=%s", lecture_id, ctx, brief)
 
-                        for f in faces:
-                            if f.get("matched"):
-                                person_id = f.get("person_id")
-                                break
+                        best_match = _pick_best_match(faces)
+                        if best_match:
+                            person_id = best_match.get("person_id")
 
                 result = {
                     "lecture_id": lecture_id,

@@ -16,15 +16,20 @@ services:
   model-preload:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
     environment:
+      FACE_ANALYSIS_CTX_ID: "-1"
+      FACE_ANALYSIS_DET_SIZE: "1024"
       NO_ALBUMENTATIONS_UPDATE: "1"
     working_dir: /app
     volumes:
       - /home/deploy/insightface:/root/.insightface
     entrypoint: ["/bin/sh","-lc"]
     command: >
-      python -c "from insightface.app import FaceAnalysis;
+      python -c "import os;
+      from insightface.app import FaceAnalysis;
       app=FaceAnalysis(allowed_modules=['detection','recognition']);
-      app.prepare(ctx_id=-1, det_size=(640,640));
+      det_size=int(os.getenv('FACE_ANALYSIS_DET_SIZE', '1024'));
+      ctx_id=int(os.getenv('FACE_ANALYSIS_CTX_ID', '-1'));
+      app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size));
       print('model ready')"
 
   face-service:
@@ -36,6 +41,9 @@ services:
     ports:
       - "8180:8180"
     environment:
+      FACE_RECOGNITION_THRESHOLD: "0.55"
+      FACE_ANALYSIS_CTX_ID: "-1"
+      FACE_ANALYSIS_DET_SIZE: "1024"
       OUT_AMQP_URL: amqp://user:pass@rabbitmq:5672/
       OUT_QUEUE_PREFIX: faces.recognition.out
 
