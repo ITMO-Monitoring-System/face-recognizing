@@ -202,8 +202,8 @@ def resolve_out_queue_for_lecture(lecture_id: int) -> str:
 
 def backend_cfg() -> Tuple[Optional[str], str, str]:
     base = os.getenv("BACKEND_URL")
-    start_path = os.getenv("BACKEND_START_PATH", "/api/lecture/start")
-    stop_path = os.getenv("BACKEND_STOP_PATH", "/api/lecture/stop")
+    start_path = os.getenv("BACKEND_START_PATH", "/api/service/lecture/start")
+    stop_path = os.getenv("BACKEND_STOP_PATH", "/api/service/lecture/stop")
     return base, start_path, stop_path
 
 

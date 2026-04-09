@@ -54,8 +54,8 @@ services:
       OUT_QUEUE_PREFIX: ${OUT_QUEUE_PREFIX:-faces.recognition.out}
 
       BACKEND_URL: ${BACKEND_URL:-https://projctviscon.vps.webdock.cloud}
-      BACKEND_START_PATH: ${BACKEND_START_PATH:-/api/lecture/start}
-      BACKEND_STOP_PATH: ${BACKEND_STOP_PATH:-/api/lecture/stop}
+      BACKEND_START_PATH: ${BACKEND_START_PATH:-/api/service/lecture/start}
+      BACKEND_STOP_PATH: ${BACKEND_STOP_PATH:-/api/service/lecture/stop}
       BACKEND_DATASET_PATH: ${BACKEND_DATASET_PATH:-/api/service/dataset}
 
       REDIS_URL: redis://redis:6379/0
