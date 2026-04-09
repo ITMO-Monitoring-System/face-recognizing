@@ -53,7 +53,7 @@ services:
       OUT_AMQP_URL: amqp://${RABBITMQ_USER:-user}:${RABBITMQ_PASSWORD:-pass}@rabbitmq:5672/
       OUT_QUEUE_PREFIX: ${OUT_QUEUE_PREFIX:-faces.recognition.out}
 
-      BACKEND_URL: ${BACKEND_URL:-http://89.111.170.130:8080}
+      BACKEND_URL: ${BACKEND_URL:-https://projctviscon.vps.webdock.cloud}
       BACKEND_START_PATH: ${BACKEND_START_PATH:-/api/lecture/start}
       BACKEND_STOP_PATH: ${BACKEND_STOP_PATH:-/api/lecture/stop}
       BACKEND_DATASET_PATH: ${BACKEND_DATASET_PATH:-/api/service/dataset}
