@@ -8,7 +8,7 @@ log = logging.getLogger(__name__)
 
 _app: FaceAnalysis | None = None
 DEFAULT_CTX_ID = int(os.getenv("FACE_ANALYSIS_CTX_ID", "-1"))
-DEFAULT_DET_SIZE = int(os.getenv("FACE_ANALYSIS_DET_SIZE", "1024"))
+DEFAULT_DET_SIZE = int(os.getenv("FACE_ANALYSIS_DET_SIZE", "640"))
 
 
 def get_app() -> FaceAnalysis:

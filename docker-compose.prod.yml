@@ -20,7 +20,7 @@ services:
       context: .
     environment:
       FACE_ANALYSIS_CTX_ID: "-1"
-      FACE_ANALYSIS_DET_SIZE: "1024"
+      FACE_ANALYSIS_DET_SIZE: "640"
       NO_ALBUMENTATIONS_UPDATE: "1"
     working_dir: /app
     volumes:
@@ -30,7 +30,7 @@ services:
       python -c "import os;
       from insightface.app import FaceAnalysis;
       app=FaceAnalysis(allowed_modules=['detection','recognition']);
-      det_size=int(os.getenv('FACE_ANALYSIS_DET_SIZE', '1024'));
+      det_size=int(os.getenv('FACE_ANALYSIS_DET_SIZE', '640'));
       ctx_id=int(os.getenv('FACE_ANALYSIS_CTX_ID', '-1'));
       app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size));
       print('model ready')"
@@ -49,7 +49,7 @@ services:
     environment:
       FACE_RECOGNITION_THRESHOLD: "0.55"
       FACE_ANALYSIS_CTX_ID: "-1"
-      FACE_ANALYSIS_DET_SIZE: "1024"
+      FACE_ANALYSIS_DET_SIZE: "640"
       OUT_AMQP_URL: amqp://${RABBITMQ_USER:-user}:${RABBITMQ_PASSWORD:-pass}@rabbitmq:5672/
       OUT_QUEUE_PREFIX: ${OUT_QUEUE_PREFIX:-faces.recognition.out}
 
