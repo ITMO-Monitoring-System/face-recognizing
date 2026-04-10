@@ -252,6 +252,10 @@ def notify_backend_stop(lecture_id: int, out_queue: str) -> None:
 def run_lecture_consumer(rt: LectureRuntime) -> None:
     rt.running = True
 
+    # Load dataset once into memory — avoids Redis round-trip on every frame
+    persons_cache = load_dataset(rdb, rt.lecture_id)
+    log.info("[lecture=%s] persons_cache loaded: %s persons", rt.lecture_id, len(persons_cache) if persons_cache else 0)
+
     out_lock = threading.Lock()
     out_ctx = OutCtx()
 
@@ -354,9 +358,9 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 person_id = None
 
                 if image_b64:
-                    persons = load_dataset(rdb, lecture_id)
-                    log.info("[lecture=%s ctx=%s] dataset loaded persons=%s", lecture_id, ctx,
-                             len(persons) if persons else 0)
+                    persons = persons_cache
+                    log.debug("[lecture=%s ctx=%s] dataset persons=%s (cached)", lecture_id, ctx,
+                              len(persons) if persons else 0)
 
                     if persons:
                         faces = recognize_b64(image_b64, persons, threshold=thr)

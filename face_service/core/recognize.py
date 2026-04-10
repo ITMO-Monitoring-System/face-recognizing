@@ -14,10 +14,20 @@ from .retina_embending import get_face_embeddings
 log = logging.getLogger(__name__)
 DEFAULT_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.55"))
 
-def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
-    a = a / (np.linalg.norm(a) + 1e-9)
-    b = b / (np.linalg.norm(b) + 1e-9)
-    return float(a @ b)
+def _build_persons_index(
+    persons: dict[str, list[np.ndarray]],
+) -> tuple[np.ndarray, list[str]] | tuple[None, None]:
+    """Pre-stack all embeddings into a normalized matrix for fast matmul matching."""
+    all_embs: list[np.ndarray] = []
+    all_pids: list[str] = []
+    for pid, embs in persons.items():
+        for e in embs:
+            norm = np.linalg.norm(e)
+            all_embs.append(e / (norm + 1e-9))
+            all_pids.append(pid)
+    if not all_embs:
+        return None, None
+    return np.stack(all_embs).astype(np.float32), all_pids
 
 
 def recognize_bgr(
@@ -29,15 +39,29 @@ def recognize_bgr(
     if not faces:
         return []
 
+    # Build normalized embedding matrix once for all faces in this frame
+    emb_matrix, all_pids = _build_persons_index(persons) if persons else (None, None)
+
     results: list[dict[str, Any]] = []
     for face in faces:
         emb = face["embedding"]
 
-        best_id, best_score = None, -1.0
-        for pid, embs in persons.items():
-            score = max(cosine_sim(emb, e) for e in embs)
-            if score > best_score:
-                best_id, best_score = pid, score
+        if emb_matrix is None:
+            best_id, best_score = None, -1.0
+        else:
+            # Vectorized cosine similarity: single matmul instead of Python loop
+            emb_norm = emb / (np.linalg.norm(emb) + 1e-9)
+            sims = emb_matrix @ emb_norm  # shape: (N,)
+
+            # Aggregate: best score per person
+            scores_by_pid: dict[str, float] = {}
+            for i, pid in enumerate(all_pids):
+                s = float(sims[i])
+                if s > scores_by_pid.get(pid, -2.0):
+                    scores_by_pid[pid] = s
+
+            best_id = max(scores_by_pid, key=scores_by_pid.__getitem__)
+            best_score = scores_by_pid[best_id]
 
         match = best_score >= threshold
         results.append(
