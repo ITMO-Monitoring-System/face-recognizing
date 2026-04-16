@@ -17,7 +17,7 @@ services:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
     environment:
       FACE_ANALYSIS_CTX_ID: "-1"
-      FACE_ANALYSIS_DET_SIZE: "640"
+      FACE_ANALYSIS_DET_SIZE: "320"
       NO_ALBUMENTATIONS_UPDATE: "1"
     working_dir: /app
     volumes:
@@ -43,7 +43,9 @@ services:
     environment:
       FACE_RECOGNITION_THRESHOLD: "0.55"
       FACE_ANALYSIS_CTX_ID: "-1"
-      FACE_ANALYSIS_DET_SIZE: "640"
+      FACE_ANALYSIS_DET_SIZE: "320"
+      FACE_DIRECT_RECOGNITION: "1"
+      FACE_RECOGNITION_WORKERS: "4"
       OUT_AMQP_URL: amqp://user:pass@rabbitmq:5672/
       OUT_QUEUE_PREFIX: faces.recognition.out
 

@@ -1,4 +1,5 @@
 import base64
+import concurrent.futures
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from pydantic import BaseModel, Field
 from face_service.core.recognize import (
     DEFAULT_RECOGNITION_THRESHOLD,
     best_embedding_bytes,
+    build_persons_index,
     recognize_b64,
 )
 from logic.dataset_store import delete_dataset, load_dataset, make_redis, save_dataset
@@ -256,164 +258,146 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
     persons_cache = load_dataset(rdb, rt.lecture_id)
     log.info("[lecture=%s] persons_cache loaded: %s persons", rt.lecture_id, len(persons_cache) if persons_cache else 0)
 
-    out_lock = threading.Lock()
-    out_ctx = OutCtx()
+    # Build normalized embedding index once for the whole lecture — reused across all frames
+    persons_index = build_persons_index(persons_cache) if persons_cache else (None, None, None)
+    if persons_index[0] is not None:
+        log.info(
+            "[lecture=%s] persons_index built: %s unique ids, %s total embeddings",
+            rt.lecture_id,
+            len(persons_index[2]),
+            persons_index[0].shape[0],
+        )
+
+    # Worker pool: onnxruntime releases the GIL during inference, so recognize_b64
+    # scales across threads. N = FACE_RECOGNITION_WORKERS (default 4).
+    num_workers = max(1, int(os.getenv("FACE_RECOGNITION_WORKERS", "4")))
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=num_workers,
+        thread_name_prefix=f"rec-{rt.lecture_id}",
+    )
+
+    out_ctx = OutCtx()  # used only from pika IO thread via add_callback_threadsafe
 
     def ensure_out_ready() -> None:
         if out_ctx.conn and out_ctx.ch and not out_ctx.conn.is_closed:
-            log.debug("[lecture=%s] OUT reuse existing connection", rt.lecture_id)
             return
-
         log.info("[lecture=%s] OUT creating connection to %s", rt.lecture_id, rt.out_amqp_url)
         out_ctx.conn = _make_blocking_conn(rt.out_amqp_url)
         out_ctx.ch = out_ctx.conn.channel()
         out_ctx.ch.queue_declare(queue=rt.out_queue, durable=True)
         log.info("[lecture=%s] OUT declared queue=%s", rt.lecture_id, rt.out_queue)
 
-    log.info(
-        "[lecture=%s] OUT queue ready: amqp=%s queue=%s",
-        rt.lecture_id,
-        rt.out_amqp_url,
-        rt.out_queue,
-    )
-
     def publish_out(payload: Dict[str, Any]) -> bool:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            ensure_out_ready()
+            assert out_ctx.ch is not None
+            out_ctx.ch.basic_publish(
+                exchange="",
+                routing_key=rt.out_queue,
+                body=body,
+            )
+            return True
+        except Exception as e:
+            rt.last_error = f"OUT publish failed: {e}"
+            log.error(
+                "[lecture=%s] OUT publish FAILED queue=%s err=%r",
+                rt.lecture_id,
+                rt.out_queue,
+                e,
+            )
+            out_ctx.close()
+            return False
 
-        with out_lock:
-            try:
-                ensure_out_ready()
-                assert out_ctx.ch is not None
+    def do_recognize(body: bytes, ctx: str) -> Dict[str, Any]:
+        """CPU-bound work: runs in executor thread. No pika access here."""
+        try:
+            msg = json.loads(body.decode("utf-8"))
+            image_b64 = msg.get("image_b64")
+            thr = float(msg.get("threshold", rt.threshold))
 
-                out_ctx.ch.basic_publish(
-                    exchange="",
-                    routing_key=rt.out_queue,
-                    body=body,
-                )
+            if not image_b64:
+                log.warning("[lecture=%s ctx=%s] no image_b64 keys=%s",
+                            rt.lecture_id, ctx, list(msg.keys()))
+                return {"lecture_id": rt.lecture_id, "person_id": None}
 
-                log.info(
-                    "[lecture=%s] OUT publish OK queue=%s bytes=%d",
-                    rt.lecture_id,
-                    rt.out_queue,
-                    len(body),
-                )
+            if persons_index[0] is None:
+                return {"lecture_id": rt.lecture_id, "person_id": None}
 
-                return True
+            faces = recognize_b64(image_b64, persons_cache, threshold=thr, prebuilt_index=persons_index)
 
-            except Exception as e:
-                rt.last_error = f"OUT publish failed: {e}"
-                log.error(
-                    "[lecture=%s] OUT publish FAILED queue=%s err=%r",
-                    rt.lecture_id,
-                    rt.out_queue,
-                    e,
-                )
-                out_ctx.close()
-                return False
+            person_id = None
+            if faces:
+                if log.isEnabledFor(logging.DEBUG):
+                    brief = [
+                        {
+                            "matched": f.get("matched"),
+                            "person_id": f.get("person_id"),
+                            "score": f.get("score"),
+                            "det_score": f.get("det_score"),
+                        }
+                        for f in faces[:3]
+                    ]
+                    log.debug("[lecture=%s ctx=%s] recognize top=%s", rt.lecture_id, ctx, brief)
+
+                best_match = _pick_best_match(faces)
+                if best_match:
+                    person_id = best_match.get("person_id")
+
+            return {"lecture_id": rt.lecture_id, "person_id": person_id}
+        except Exception:
+            log.exception("[lecture=%s ctx=%s] worker error", rt.lecture_id, ctx)
+            return {"lecture_id": rt.lecture_id, "person_id": None}
 
     try:
-        # IN connect (RabbitMQ Димы)
         rt.in_conn = _make_blocking_conn(rt.in_amqp_url)
         rt.in_ch = rt.in_conn.channel()
         rt.in_ch.queue_declare(queue=rt.in_queue, durable=True)
-        rt.in_ch.basic_qos(prefetch_count=1)
+        rt.in_ch.basic_qos(prefetch_count=num_workers)
 
         log.info(
-            "[lecture=%s] consumer started in_queue=%s out_queue=%s",
+            "[lecture=%s] consumer started in_queue=%s out_queue=%s workers=%s",
             rt.lecture_id,
             rt.in_queue,
             rt.out_queue,
+            num_workers,
         )
 
-        # notify Artem: где читать результаты этой лекции
         notify_backend_start(rt.lecture_id, rt.out_queue)
 
         def on_message(ch, method, props, body: bytes):
-            lecture_id = rt.lecture_id
-            ctx = str(getattr(method, "delivery_tag", "na"))
-            try:
-                msg = json.loads(body.decode("utf-8"))
-                image_b64 = msg.get("image_b64")
-                thr = float(msg.get("threshold", rt.threshold))
+            delivery_tag = method.delivery_tag
+            ctx = str(delivery_tag)
 
-                # logging
-                if not image_b64:
-                    log.warning("[lecture=%s ctx=%s] no image_b64 in message keys=%s", lecture_id, ctx,
-                                list(msg.keys()))
-                else:
-                    try:
-                        raw = base64.b64decode(_strip_data_url(image_b64), validate=False)
-                        arr = np.frombuffer(raw, dtype=np.uint8)
-                        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-                        if img is None:
-                            log.warning("[lecture=%s ctx=%s] imdecode=None raw_bytes=%s b64_len=%s",
-                                        lecture_id, ctx, len(raw), len(image_b64))
-                        else:
-                            h, w = img.shape[:2]
-                            log.info("[lecture=%s ctx=%s] img decoded %sx%s raw_bytes=%s b64_len=%s thr=%.4f",
-                                     lecture_id, ctx, w, h, len(raw), len(image_b64), thr)
-                    except Exception as e:
-                        log.exception("[lecture=%s ctx=%s] b64 decode failed: %s", lecture_id, ctx, e)
+            future = executor.submit(do_recognize, body, ctx)
 
-                person_id = None
-
-                if image_b64:
-                    persons = persons_cache
-                    log.debug("[lecture=%s ctx=%s] dataset persons=%s (cached)", lecture_id, ctx,
-                              len(persons) if persons else 0)
-
-                    if persons:
-                        faces = recognize_b64(image_b64, persons, threshold=thr)
-                        log.info("[lecture=%s ctx=%s] recognize returned faces=%s", lecture_id, ctx,
-                                 len(faces) if faces else 0)
-
-
-                        if faces:
-
-                            brief = []
-                            for f in faces[:3]:
-                                brief.append({
-                                    "matched": f.get("matched"),
-                                    "person_id": f.get("person_id"),
-                                    "score": f.get("score") or f.get("similarity") or f.get("cosine"),
-                                    "det_score": f.get("det_score"),
-                                })
-                            log.info("[lecture=%s ctx=%s] recognize top=%s", lecture_id, ctx, brief)
-
-                        best_match = _pick_best_match(faces)
-                        if best_match:
-                            person_id = best_match.get("person_id")
-
-                result = {
-                    "lecture_id": lecture_id,
-                    "person_id": person_id,
-                }
-
+            def finalize(result: Dict[str, Any]):
+                """Runs on pika IO thread — safe to touch channel/connection."""
                 with _last_results_lock:
-                    _last_results[lecture_id] = result
-
+                    _last_results[rt.lecture_id] = result
                 if not publish_out(result):
                     rt.last_error = "OUT publish failed (will retry on next message)"
+                try:
+                    ch.basic_ack(delivery_tag=delivery_tag)
+                except Exception:
+                    log.exception("[lecture=%s] ack failed tag=%s", rt.lecture_id, delivery_tag)
+                if log.isEnabledFor(logging.DEBUG):
+                    log.debug("[lecture=%s] result %s", rt.lecture_id, result)
 
-                log.info("[lecture=%s] result %s", lecture_id, result)
+            def on_done(fut: concurrent.futures.Future):
+                try:
+                    result = fut.result()
+                except Exception:
+                    log.exception("[lecture=%s] future error", rt.lecture_id)
+                    result = {"lecture_id": rt.lecture_id, "person_id": None}
+                try:
+                    rt.in_conn.add_callback_threadsafe(lambda: finalize(result))
+                except Exception:
+                    log.exception("[lecture=%s] add_callback_threadsafe failed", rt.lecture_id)
 
-            except Exception as e:
-                err = {
-                    "lecture_id": lecture_id,
-                    "person_id": None,
-                }
-                with _last_results_lock:
-                    _last_results[lecture_id] = err
-                publish_out(err)  # best-effort
-                rt.last_error = str(e)
-                log.exception("[lecture=%s] error while processing message", lecture_id)
-
-            finally:
-                ch.basic_ack(delivery_tag=method.delivery_tag)
+            future.add_done_callback(on_done)
 
         rt.in_ch.basic_consume(queue=rt.in_queue, on_message_callback=on_message)
-
-        # consuming loop
         rt.in_ch.start_consuming()
 
     except Exception as e:
@@ -421,12 +405,15 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         log.exception("[lecture=%s] consumer stopped with error", rt.lecture_id)
 
     finally:
-        # notify Artem stop
         notify_backend_stop(rt.lecture_id, rt.out_queue)
 
         try:
-            with out_lock:
-                out_ctx.close()
+            executor.shutdown(wait=True, cancel_futures=True)
+        except Exception:
+            pass
+
+        try:
+            out_ctx.close()
         except Exception:
             pass
 

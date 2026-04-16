@@ -9,38 +9,93 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .retina_embending import get_face_embeddings
+from .retina_embending import embed_crop_direct, get_face_embeddings
 
 log = logging.getLogger(__name__)
 DEFAULT_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", "0.55"))
+DIRECT_RECOGNITION = os.getenv("FACE_DIRECT_RECOGNITION", "0") == "1"
 
-def _build_persons_index(
+
+def build_persons_index(
     persons: dict[str, list[np.ndarray]],
-) -> tuple[np.ndarray, list[str]] | tuple[None, None]:
-    """Pre-stack all embeddings into a normalized matrix for fast matmul matching."""
+) -> tuple[np.ndarray, np.ndarray, list[str]] | tuple[None, None, None]:
+    """Pre-stack normalized embeddings + pid group offsets for fast matmul + reduceat.
+
+    Returns (emb_matrix, group_starts, unique_pids) where rows in emb_matrix are grouped
+    by pid and group_starts[i] is the first row of unique_pids[i]. This lets us replace
+    the per-frame Python aggregation loop with a single np.maximum.reduceat call.
+    """
+    if not persons:
+        return None, None, None
+
     all_embs: list[np.ndarray] = []
-    all_pids: list[str] = []
+    group_starts: list[int] = []
+    unique_pids: list[str] = []
     for pid, embs in persons.items():
+        if not embs:
+            continue
+        group_starts.append(len(all_embs))
+        unique_pids.append(pid)
         for e in embs:
             norm = np.linalg.norm(e)
             all_embs.append(e / (norm + 1e-9))
-            all_pids.append(pid)
+
     if not all_embs:
+        return None, None, None
+
+    return (
+        np.stack(all_embs).astype(np.float32),
+        np.asarray(group_starts, dtype=np.int64),
+        unique_pids,
+    )
+
+
+# Back-compat shim for any external callers
+def _build_persons_index(
+    persons: dict[str, list[np.ndarray]],
+) -> tuple[np.ndarray, list[str]] | tuple[None, None]:
+    emb_matrix, _, unique_pids = build_persons_index(persons)
+    if emb_matrix is None:
         return None, None
-    return np.stack(all_embs).astype(np.float32), all_pids
+    # Flat pid list matching emb_matrix rows (for legacy callers)
+    flat: list[str] = []
+    for pid, embs in persons.items():
+        for _ in embs:
+            flat.append(pid)
+    return emb_matrix, flat
+
+
+def _match_face(
+    emb: np.ndarray,
+    emb_matrix: np.ndarray,
+    group_starts: np.ndarray,
+    unique_pids: list[str],
+) -> tuple[str, float]:
+    emb_norm = emb / (np.linalg.norm(emb) + 1e-9)
+    sims = emb_matrix @ emb_norm  # (N,)
+    # Per-pid best score via segmented max
+    per_pid = np.maximum.reduceat(sims, group_starts)
+    best_idx = int(np.argmax(per_pid))
+    return unique_pids[best_idx], float(per_pid[best_idx])
 
 
 def recognize_bgr(
     img_bgr: np.ndarray,
     persons: dict[str, list[np.ndarray]],
     threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
+    prebuilt_index: tuple[np.ndarray, np.ndarray, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
-    faces = get_face_embeddings(img_bgr)
+    if DIRECT_RECOGNITION:
+        faces = embed_crop_direct(img_bgr)
+    else:
+        faces = get_face_embeddings(img_bgr)
     if not faces:
         return []
 
-    # Build normalized embedding matrix once for all faces in this frame
-    emb_matrix, all_pids = _build_persons_index(persons) if persons else (None, None)
+    if prebuilt_index is not None:
+        emb_matrix, group_starts, unique_pids = prebuilt_index
+    else:
+        emb_matrix, group_starts, unique_pids = build_persons_index(persons) if persons else (None, None, None)
 
     results: list[dict[str, Any]] = []
     for face in faces:
@@ -49,19 +104,7 @@ def recognize_bgr(
         if emb_matrix is None:
             best_id, best_score = None, -1.0
         else:
-            # Vectorized cosine similarity: single matmul instead of Python loop
-            emb_norm = emb / (np.linalg.norm(emb) + 1e-9)
-            sims = emb_matrix @ emb_norm  # shape: (N,)
-
-            # Aggregate: best score per person
-            scores_by_pid: dict[str, float] = {}
-            for i, pid in enumerate(all_pids):
-                s = float(sims[i])
-                if s > scores_by_pid.get(pid, -2.0):
-                    scores_by_pid[pid] = s
-
-            best_id = max(scores_by_pid, key=scores_by_pid.__getitem__)
-            best_score = scores_by_pid[best_id]
+            best_id, best_score = _match_face(emb, emb_matrix, group_starts, unique_pids)
 
         match = best_score >= threshold
         results.append(
@@ -93,6 +136,7 @@ def recognize_bytes(
     img_bytes: bytes,
     persons: dict[str, list[np.ndarray]],
     threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
+    prebuilt_index: tuple[np.ndarray, np.ndarray, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     arr = np.frombuffer(img_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -115,19 +159,16 @@ def recognize_bytes(
     if scale != 1.0:
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
-    res = recognize_bgr(img, persons, threshold=threshold)
+    res = recognize_bgr(img, persons, threshold=threshold, prebuilt_index=prebuilt_index)
 
     # 2) fallback retry: если не нашли лицо и исходник был маленький — пробуем ещё сильнее
     # (иногда 4x даёт детект там, где 2x не даёт)
     if not res and min_side < 600 and scale < 4.0:
         img2 = cv2.resize(img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)  # итого 4x от исходника
-        res = recognize_bgr(img2, persons, threshold=threshold)
+        res = recognize_bgr(img2, persons, threshold=threshold, prebuilt_index=prebuilt_index)
 
-    # 3) debug лог (оставь хотя бы на время)
-    try:
-        log.info("recognize_bytes: orig=%sx%s scale=%.1f res=%s", w, h, scale, len(res))
-    except Exception:
-        pass
+    if log.isEnabledFor(logging.DEBUG):
+        log.debug("recognize_bytes: orig=%sx%s scale=%.1f res=%s", w, h, scale, len(res))
 
     return res
 
@@ -137,11 +178,12 @@ def recognize_b64(
     image_b64: str,
     persons: dict[str, list[np.ndarray]],
     threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
+    prebuilt_index: tuple[np.ndarray, np.ndarray, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
     if image_b64 and image_b64.strip().lower().startswith("data:"):
         image_b64 = image_b64.split(",", 1)[1]  # убрать "data:image/...;base64,"
     img_bytes = base64.b64decode(image_b64, validate=False)
-    return recognize_bytes(img_bytes, persons, threshold=threshold)
+    return recognize_bytes(img_bytes, persons, threshold=threshold, prebuilt_index=prebuilt_index)
 
 def embeddings_bytes(img_bytes: bytes) -> list[dict[str, Any]]:
     arr = np.frombuffer(img_bytes, dtype=np.uint8)
