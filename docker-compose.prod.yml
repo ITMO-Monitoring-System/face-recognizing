@@ -71,6 +71,7 @@ services:
       - face_tracking
 
 networks:
+  default: {}
   face_tracking:
     external: true
     name: face-tracking_default
