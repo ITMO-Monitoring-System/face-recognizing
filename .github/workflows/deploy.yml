@@ -16,7 +16,7 @@ jobs:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || secrets.SSH_HOST }}
       DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || secrets.SSH_PORT }}
       DEPLOY_USERNAME: ${{ secrets.DEPLOY_USERNAME || secrets.SSH_USERNAME }}
-      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/fizon/face-recognizing' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '~/site1/face-recognizing' }}
       APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
 
     steps:
@@ -49,7 +49,7 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -p "${DEPLOY_PORT}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
 
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p '${DEPLOY_PATH}'"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p ${DEPLOY_PATH}"
 
           rsync -az --delete \
             --exclude ".git" \
@@ -58,25 +58,8 @@ jobs:
             --exclude "__pycache__" \
             --exclude ".pytest_cache" \
             --exclude ".venv" \
-            --exclude ".env.production" \
+            --exclude ".env" \
             -e "ssh -p ${DEPLOY_PORT}" \
             ./ "${REMOTE}:${DEPLOY_PATH}/"
 
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" <<EOSSH
-            set -Eeuo pipefail
-            cd "${DEPLOY_PATH}"
-
-            if ! command -v docker >/dev/null 2>&1; then
-              echo "docker is not installed on server"
-              exit 1
-            fi
-
-            COMPOSE_ENV_ARGS=""
-            if [ -f ".env.production" ]; then
-              COMPOSE_ENV_ARGS="--env-file .env.production"
-            fi
-
-            docker compose \${COMPOSE_ENV_ARGS} -f docker-compose.prod.yml up -d --build --remove-orphans
-            docker compose \${COMPOSE_ENV_ARGS} -f docker-compose.prod.yml ps
-            docker image prune -f
-          EOSSH
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "site1ctl rebuild recognizing"
