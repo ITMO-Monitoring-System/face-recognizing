@@ -19,15 +19,19 @@ DIRECT_RECOGNITION = os.getenv("FACE_DIRECT_RECOGNITION", "0") == "1"
 def get_app() -> FaceAnalysis:
     global _app, _rec, _input_size
     if _app is None:
-        modules = ["recognition"] if DIRECT_RECOGNITION else ["detection", "recognition"]
-        _app = FaceAnalysis(allowed_modules=modules)
+        # ВАЖНО: insightface.FaceAnalysis имеет жёсткий assert "'detection' in self.models",
+        # поэтому нельзя ограничить модули только recognition — иначе __init__ падает с
+        # AssertionError и _app остаётся None, цикл повторяется на каждом кадре.
+        # Detection-модель грузим всегда (~170MB), но при DIRECT_RECOGNITION её
+        # никогда не вызываем — горячий путь идёт через embed_crop_direct.
+        _app = FaceAnalysis(allowed_modules=["detection", "recognition"])
         try:
             _app.prepare(ctx_id=DEFAULT_CTX_ID, det_size=(DEFAULT_DET_SIZE, DEFAULT_DET_SIZE))
             log.info(
-                "InsightFace prepared with ctx_id=%s det_size=%s modules=%s",
+                "InsightFace prepared with ctx_id=%s det_size=%s direct=%s",
                 DEFAULT_CTX_ID,
                 DEFAULT_DET_SIZE,
-                modules,
+                DIRECT_RECOGNITION,
             )
         except Exception:
             if DEFAULT_CTX_ID == -1:
