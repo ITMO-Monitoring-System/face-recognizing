@@ -269,8 +269,11 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         )
 
     # Worker pool: onnxruntime releases the GIL during inference, so recognize_b64
-    # scales across threads. N = FACE_RECOGNITION_WORKERS (default 4).
-    num_workers = max(1, int(os.getenv("FACE_RECOGNITION_WORKERS", "4")))
+    # scales across threads. По умолчанию — половина ядер сервера (минимум 1, максимум 4),
+    # чтобы потоки не конкурировали за CPU. Перебить можно через FACE_RECOGNITION_WORKERS.
+    _cpu = os.cpu_count() or 2
+    _default_workers = max(1, min(4, _cpu // 2))
+    num_workers = max(1, int(os.getenv("FACE_RECOGNITION_WORKERS", str(_default_workers))))
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=num_workers,
         thread_name_prefix=f"rec-{rt.lecture_id}",

@@ -70,8 +70,9 @@ def _match_face(
     emb_matrix: np.ndarray,
     group_starts: np.ndarray,
     unique_pids: list[str],
+    already_normalized: bool = False,
 ) -> tuple[str, float]:
-    emb_norm = emb / (np.linalg.norm(emb) + 1e-9)
+    emb_norm = emb if already_normalized else emb / (np.linalg.norm(emb) + 1e-9)
     sims = emb_matrix @ emb_norm  # (N,)
     # Per-pid best score via segmented max
     per_pid = np.maximum.reduceat(sims, group_starts)
@@ -104,7 +105,10 @@ def recognize_bgr(
         if emb_matrix is None:
             best_id, best_score = None, -1.0
         else:
-            best_id, best_score = _match_face(emb, emb_matrix, group_starts, unique_pids)
+            best_id, best_score = _match_face(
+                emb, emb_matrix, group_starts, unique_pids,
+                already_normalized=DIRECT_RECOGNITION,
+            )
 
         match = best_score >= threshold
         results.append(
@@ -146,24 +150,26 @@ def recognize_bytes(
     h, w = img.shape[:2]
 
 
-    # 1) базовый upscale для маленьких кадров (поднимает шанс детекта)
+    # 1) базовый upscale для маленьких кадров (поднимает шанс детекта).
+    # При DIRECT_RECOGNITION детектора нет — апскейл бессмыслен (всё равно ресайзим к 112x112).
     scale = 1.0
     min_side = min(w, h)
-    if min_side < 160:
-        scale = 8.0
-    elif min_side < 300:
-        scale = 4.0
-    elif min_side < 600:
-        scale = 2.0
+    if not DIRECT_RECOGNITION:
+        if min_side < 160:
+            scale = 8.0
+        elif min_side < 300:
+            scale = 4.0
+        elif min_side < 600:
+            scale = 2.0
 
-    if scale != 1.0:
-        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        if scale != 1.0:
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
     res = recognize_bgr(img, persons, threshold=threshold, prebuilt_index=prebuilt_index)
 
     # 2) fallback retry: если не нашли лицо и исходник был маленький — пробуем ещё сильнее
-    # (иногда 4x даёт детект там, где 2x не даёт)
-    if not res and min_side < 600 and scale < 4.0:
+    # (иногда 4x даёт детект там, где 2x не даёт). Не нужен при DIRECT_RECOGNITION.
+    if not DIRECT_RECOGNITION and not res and min_side < 600 and scale < 4.0:
         img2 = cv2.resize(img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)  # итого 4x от исходника
         res = recognize_bgr(img2, persons, threshold=threshold, prebuilt_index=prebuilt_index)
 

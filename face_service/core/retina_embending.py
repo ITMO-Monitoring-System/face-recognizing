@@ -8,26 +8,35 @@ from insightface.app import FaceAnalysis
 log = logging.getLogger(__name__)
 
 _app: FaceAnalysis | None = None
+_rec = None
+_input_size: tuple[int, int] = (112, 112)
+
 DEFAULT_CTX_ID = int(os.getenv("FACE_ANALYSIS_CTX_ID", "-1"))
 DEFAULT_DET_SIZE = int(os.getenv("FACE_ANALYSIS_DET_SIZE", "640"))
+DIRECT_RECOGNITION = os.getenv("FACE_DIRECT_RECOGNITION", "0") == "1"
 
 
 def get_app() -> FaceAnalysis:
-    global _app
+    global _app, _rec, _input_size
     if _app is None:
-        _app = FaceAnalysis(allowed_modules=["detection", "recognition"])
+        modules = ["recognition"] if DIRECT_RECOGNITION else ["detection", "recognition"]
+        _app = FaceAnalysis(allowed_modules=modules)
         try:
             _app.prepare(ctx_id=DEFAULT_CTX_ID, det_size=(DEFAULT_DET_SIZE, DEFAULT_DET_SIZE))
             log.info(
-                "InsightFace prepared with ctx_id=%s det_size=%s",
+                "InsightFace prepared with ctx_id=%s det_size=%s modules=%s",
                 DEFAULT_CTX_ID,
                 DEFAULT_DET_SIZE,
+                modules,
             )
         except Exception:
             if DEFAULT_CTX_ID == -1:
                 raise
             log.exception("Failed to initialize GPU ctx_id=%s, falling back to CPU", DEFAULT_CTX_ID)
             _app.prepare(ctx_id=-1, det_size=(DEFAULT_DET_SIZE, DEFAULT_DET_SIZE))
+        _rec = _app.models.get("recognition") if hasattr(_app, "models") else None
+        if _rec is not None:
+            _input_size = getattr(_rec, "input_size", (112, 112))
     return _app
 
 
@@ -49,20 +58,17 @@ def embed_crop_direct(img_bgr: np.ndarray) -> list[dict[str, object]]:
     Used when face-tracking already detected and cropped the face (via MediaPipe).
     Avoids the double-detection (MediaPipe → InsightFace detector) penalty.
     """
-    app = get_app()
-    rec = app.models.get("recognition") if hasattr(app, "models") else None
-    if rec is None:
-        # Fallback: full pipeline if recognition model not accessible as expected
+    get_app()
+    if _rec is None:
         return get_face_embeddings(img_bgr)
 
     h, w = img_bgr.shape[:2]
     if h == 0 or w == 0:
         return []
 
-    input_size = getattr(rec, "input_size", (112, 112))
-    face_112 = cv2.resize(img_bgr, input_size)
+    face_112 = cv2.resize(img_bgr, _input_size)
 
-    raw = rec.get_feat(face_112)
+    raw = _rec.get_feat(face_112)
     emb = np.asarray(raw, dtype=np.float32).reshape(-1)
     norm = float(np.linalg.norm(emb))
     normed = emb / (norm + 1e-9)
