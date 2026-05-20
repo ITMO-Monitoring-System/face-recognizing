@@ -18,6 +18,7 @@ jobs:
       DEPLOY_USERNAME: ${{ secrets.DEPLOY_USERNAME || secrets.SSH_USERNAME }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '~/site1/face-recognizing' }}
       APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
+      APP_CONTAINER: face-recognizing_face-service_1
 
     steps:
       - name: Checkout repository
@@ -63,10 +64,27 @@ jobs:
             ./ "${REMOTE}:${DEPLOY_PATH}/"
 
           echo "Building images and recreating containers..."
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'cd ${DEPLOY_PATH} && podman-compose --env-file .env -f docker-compose.prod.yml up -d --build --force-recreate'"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'cd ${DEPLOY_PATH} && podman-compose --env-file .env.production -f docker-compose.prod.yml up -d --build --force-recreate'"
 
           echo "Removing dangling images to free disk space..."
           ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman image prune -f'"
 
           echo "Container status after deploy:"
           ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman ps'" || true
+
+          echo "Verifying ${APP_CONTAINER} is running..."
+          deploy_ok=
+          for attempt in $(seq 1 18); do
+            if ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman ps --filter name=${APP_CONTAINER} --filter status=running --quiet'" | grep -q .; then
+              deploy_ok=1
+              break
+            fi
+            echo "  ${APP_CONTAINER} not ready yet (${attempt}/18), waiting 5s..."
+            sleep 5
+          done
+          if [ -z "${deploy_ok:-}" ]; then
+            echo "::error::${APP_CONTAINER} is NOT running after deploy"
+            ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman ps -a'" || true
+            exit 1
+          fi
+          echo "${APP_CONTAINER} is running — deploy verified."
