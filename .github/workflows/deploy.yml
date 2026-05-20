@@ -62,4 +62,11 @@ jobs:
             -e "ssh -p ${DEPLOY_PORT}" \
             ./ "${REMOTE}:${DEPLOY_PATH}/"
 
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'site1ctl rebuild recognizing'"
+          echo "Building images and recreating containers..."
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'cd ${DEPLOY_PATH} && podman-compose --env-file .env -f docker-compose.prod.yml up -d --build --force-recreate'"
+
+          echo "Removing dangling images to free disk space..."
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman image prune -f'"
+
+          echo "Container status after deploy:"
+          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman ps'" || true
