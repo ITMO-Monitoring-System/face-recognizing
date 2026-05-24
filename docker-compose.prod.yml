@@ -8,6 +8,10 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-user}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-pass}
+    networks:
+      default:
+        aliases:
+          - recognizing-rabbitmq
 
   redis:
     image: redis:7-alpine
@@ -51,7 +55,7 @@ services:
       FACE_ANALYSIS_CTX_ID: "-1"
       FACE_ANALYSIS_DET_SIZE: "640"
       FACE_DIRECT_RECOGNITION: "1"
-      OUT_AMQP_URL: amqp://${RABBITMQ_USER:-user}:${RABBITMQ_PASSWORD:-pass}@rabbitmq:5672/
+      OUT_AMQP_URL: amqp://${RABBITMQ_USER:-user}:${RABBITMQ_PASSWORD:-pass}@recognizing-rabbitmq:5672/
       OUT_QUEUE_PREFIX: ${OUT_QUEUE_PREFIX:-faces.recognition.out}
 
       BACKEND_URL: ${BACKEND_URL:-https://projctviscon.vps.webdock.cloud}
