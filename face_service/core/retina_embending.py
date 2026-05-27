@@ -1,6 +1,14 @@
 import logging
 import os
 
+# Multi-worker ONNX inference: pin native thread pools to 1 thread per worker.
+# Без этого ORT/BLAS по умолчанию берут все ядра CPU на один инференс, и при
+# FACE_RECOGNITION_WORKERS=N получается N×N тредов конкурируют за N ядер.
+# Должно быть выставлено ДО импорта insightface (он подтягивает onnxruntime).
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis

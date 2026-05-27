@@ -10,6 +10,7 @@ psycopg[binary]   # Postgres
 # maybe in future
 fastapi
 uvicorn
+uvloop>=0.19
 
 redis
 requests

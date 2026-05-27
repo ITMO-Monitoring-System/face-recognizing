@@ -46,6 +46,9 @@ services:
       FACE_ANALYSIS_DET_SIZE: "320"
       FACE_DIRECT_RECOGNITION: "1"
       FACE_RECOGNITION_WORKERS: "4"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
       OUT_AMQP_URL: amqp://user:pass@rabbitmq:5672/
       OUT_QUEUE_PREFIX: faces.recognition.out
 

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import concurrent.futures
 import json
@@ -5,6 +6,12 @@ import logging
 import os
 import threading
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
 
 import cv2
 import numpy as np
@@ -18,6 +25,7 @@ from face_service.core.recognize import (
     best_embedding_bytes,
     build_persons_index,
     recognize_b64,
+    recognize_bytes,
 )
 from logic.dataset_store import delete_dataset, load_dataset, make_redis, save_dataset
 
@@ -312,22 +320,37 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
             out_ctx.close()
             return False
 
-    def do_recognize(body: bytes, ctx: str) -> Dict[str, Any]:
-        """CPU-bound work: runs in executor thread. No pika access here."""
+    def do_recognize(body: bytes, content_type: Optional[str], headers: Optional[dict], ctx: str) -> Dict[str, Any]:
+        """CPU-bound work: runs in executor thread. No pika access here.
+
+        Поддерживает два формата сообщения:
+        - content_type=image/jpeg → raw JPEG в body, метаданные в headers (новый).
+        - JSON-объект в body с ключом image_b64 (legacy).
+        """
         try:
-            msg = json.loads(body.decode("utf-8"))
-            image_b64 = msg.get("image_b64")
-            thr = float(msg.get("threshold", rt.threshold))
+            if content_type == "image/jpeg":
+                hdr = headers or {}
+                try:
+                    thr = float(hdr.get("threshold", rt.threshold))
+                except (TypeError, ValueError):
+                    thr = rt.threshold
+                if persons_index[0] is None:
+                    return {"lecture_id": rt.lecture_id, "person_id": None}
+                faces = recognize_bytes(body, persons_cache, threshold=thr, prebuilt_index=persons_index)
+            else:
+                msg = json.loads(body.decode("utf-8"))
+                image_b64 = msg.get("image_b64")
+                thr = float(msg.get("threshold", rt.threshold))
 
-            if not image_b64:
-                log.warning("[lecture=%s ctx=%s] no image_b64 keys=%s",
-                            rt.lecture_id, ctx, list(msg.keys()))
-                return {"lecture_id": rt.lecture_id, "person_id": None}
+                if not image_b64:
+                    log.warning("[lecture=%s ctx=%s] no image_b64 keys=%s",
+                                rt.lecture_id, ctx, list(msg.keys()))
+                    return {"lecture_id": rt.lecture_id, "person_id": None}
 
-            if persons_index[0] is None:
-                return {"lecture_id": rt.lecture_id, "person_id": None}
+                if persons_index[0] is None:
+                    return {"lecture_id": rt.lecture_id, "person_id": None}
 
-            faces = recognize_b64(image_b64, persons_cache, threshold=thr, prebuilt_index=persons_index)
+                faces = recognize_b64(image_b64, persons_cache, threshold=thr, prebuilt_index=persons_index)
 
             person_id = None
             if faces:
@@ -371,8 +394,10 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         def on_message(ch, method, props, body: bytes):
             delivery_tag = method.delivery_tag
             ctx = str(delivery_tag)
+            content_type = getattr(props, "content_type", None) if props else None
+            headers = getattr(props, "headers", None) if props else None
 
-            future = executor.submit(do_recognize, body, ctx)
+            future = executor.submit(do_recognize, body, content_type, headers, ctx)
 
             def finalize(result: Dict[str, Any]):
                 """Runs on pika IO thread — safe to touch channel/connection."""
