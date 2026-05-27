@@ -370,6 +370,14 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 if best_match:
                     person_id = best_match.get("person_id")
 
+                # INFO-лог при no-match: видно best_score чтобы понять near-miss или совсем нет.
+                if person_id is None:
+                    scores = [round(float(f.get("score", 0.0)), 3) for f in faces[:3]]
+                    log.info(
+                        "[lecture=%s] no match: faces=%d best_scores=%s thr=%s",
+                        rt.lecture_id, len(faces), scores, thr,
+                    )
+
             return {"lecture_id": rt.lecture_id, "person_id": person_id}
         except Exception:
             log.exception("[lecture=%s ctx=%s] worker error", rt.lecture_id, ctx)
@@ -403,8 +411,12 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 """Runs on pika IO thread — safe to touch channel/connection."""
                 with _last_results_lock:
                     _last_results[rt.lecture_id] = result
-                if not publish_out(result):
-                    rt.last_error = "OUT publish failed (will retry on next message)"
+                # Не публикуем "пустое" распознавание — backend всё равно отбросит из-за
+                # FK-ограничения на user_id, и мы только спамим логами. ack даём всегда,
+                # иначе сообщение зависнет в очереди.
+                if result.get("person_id"):
+                    if not publish_out(result):
+                        rt.last_error = "OUT publish failed (will retry on next message)"
                 try:
                     ch.basic_ack(delivery_tag=delivery_tag)
                 except Exception:
