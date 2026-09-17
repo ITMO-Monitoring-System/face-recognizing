@@ -60,3 +60,6 @@ uploads/
 # --- Docker ---
 *.pid
 *.tar
+
+# Local model verification assets
+.models/

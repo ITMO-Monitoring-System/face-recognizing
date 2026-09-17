@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .runtime import inference_slot
+
 import cv2
 import numpy as np
 
@@ -142,6 +144,16 @@ def recognize_bytes(
     threshold: float = DEFAULT_RECOGNITION_THRESHOLD,
     prebuilt_index: tuple[np.ndarray, np.ndarray, list[str]] | None = None,
 ) -> list[dict[str, Any]]:
+    with inference_slot():
+        return _recognize_bytes(img_bytes, persons, threshold, prebuilt_index)
+
+
+def _recognize_bytes(
+    img_bytes: bytes,
+    persons: dict[str, list[np.ndarray]],
+    threshold: float,
+    prebuilt_index: tuple[np.ndarray, np.ndarray, list[str]] | None,
+) -> list[dict[str, Any]]:
     arr = np.frombuffer(img_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
@@ -191,7 +203,12 @@ def recognize_b64(
     img_bytes = base64.b64decode(image_b64, validate=False)
     return recognize_bytes(img_bytes, persons, threshold=threshold, prebuilt_index=prebuilt_index)
 
-def embeddings_bytes(img_bytes: bytes) -> list[dict[str, Any]]:
+def embeddings_bytes(img_bytes: bytes, *, largest_only: bool = False) -> list[dict[str, Any]]:
+    with inference_slot():
+        return _embeddings_bytes(img_bytes, largest_only=largest_only)
+
+
+def _embeddings_bytes(img_bytes: bytes, *, largest_only: bool) -> list[dict[str, Any]]:
     arr = np.frombuffer(img_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if img is None:
@@ -201,16 +218,16 @@ def embeddings_bytes(img_bytes: bytes) -> list[dict[str, Any]]:
     if min(w, h) < 600:
         img = cv2.resize(img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
 
-    faces = get_face_embeddings(img)
+    faces = get_face_embeddings(img, largest_only=largest_only)
     if not faces and min(w, h) < 600:
         img2 = cv2.resize(img, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-        faces = get_face_embeddings(img2)
+        faces = get_face_embeddings(img2, largest_only=largest_only)
 
     return faces
 
 
 def best_embedding_bytes(img_bytes: bytes) -> dict[str, Any] | None:
-    faces = embeddings_bytes(img_bytes)
+    faces = embeddings_bytes(img_bytes, largest_only=True)
     if not faces:
         return None
 

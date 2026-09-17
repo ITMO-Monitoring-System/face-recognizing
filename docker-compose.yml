@@ -16,21 +16,15 @@ services:
   model-preload:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
     environment:
+      FACE_ANALYSIS_MODEL: "${FACE_ANALYSIS_MODEL:-buffalo_m}"
+      FACE_ORT_THREADS: "${FACE_ORT_THREADS:-1}"
       FACE_ANALYSIS_CTX_ID: "-1"
       FACE_ANALYSIS_DET_SIZE: "320"
       NO_ALBUMENTATIONS_UPDATE: "1"
     working_dir: /app
     volumes:
       - /home/deploy/insightface:/root/.insightface
-    entrypoint: ["/bin/sh","-lc"]
-    command: >
-      python -c "import os;
-      from insightface.app import FaceAnalysis;
-      app=FaceAnalysis(allowed_modules=['detection','recognition']);
-      det_size=int(os.getenv('FACE_ANALYSIS_DET_SIZE', '640'));
-      ctx_id=int(os.getenv('FACE_ANALYSIS_CTX_ID', '-1'));
-      app.prepare(ctx_id=ctx_id, det_size=(det_size, det_size));
-      print('model ready')"
+    entrypoint: ["python", "download_model.py"]
 
   face-service:
     image: ghcr.io/itmo-monitoring-system/face-recognizing:latest
@@ -42,10 +36,12 @@ services:
       - "8180:8180"
     environment:
       FACE_RECOGNITION_THRESHOLD: "0.55"
+      FACE_ANALYSIS_MODEL: "${FACE_ANALYSIS_MODEL:-buffalo_m}"
+      FACE_ORT_THREADS: "${FACE_ORT_THREADS:-1}"
       FACE_ANALYSIS_CTX_ID: "-1"
       FACE_ANALYSIS_DET_SIZE: "320"
       FACE_DIRECT_RECOGNITION: "1"
-      FACE_RECOGNITION_WORKERS: "4"
+      FACE_RECOGNITION_WORKERS: "${FACE_RECOGNITION_WORKERS:-4}"
       OMP_NUM_THREADS: "1"
       MKL_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"

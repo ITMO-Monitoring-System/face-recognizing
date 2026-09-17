@@ -5,7 +5,10 @@ import json
 import logging
 import os
 import threading
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
+
+from face_service.core.runtime import INFERENCE_WORKERS
 
 try:
     import uvloop
@@ -28,11 +31,20 @@ from face_service.core.recognize import (
     recognize_bytes,
 )
 from logic.dataset_store import delete_dataset, load_dataset, make_redis, save_dataset
+from face_service.core.retina_embending import get_app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("face-service")
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Fail before accepting traffic if weights cannot be loaded; get_app also
+    # protects callers outside ASGI against concurrent initialization.
+    await asyncio.to_thread(get_app)
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 rdb = make_redis()
 
 log = logging.getLogger(__name__)
@@ -52,7 +64,7 @@ class PersonIn(BaseModel):
 
 
 class DatasetIn(BaseModel):
-    lecture_id: int = Field(..., min_length=1)
+    lecture_id: int
     persons: List[PersonIn]
 
 
@@ -93,7 +105,7 @@ async def embedding_from_bytes(request: Request):
     if not img_bytes:
         raise HTTPException(status_code=400, detail="empty body")
 
-    face = best_embedding_bytes(img_bytes)
+    face = await asyncio.to_thread(best_embedding_bytes, img_bytes)
     if face is None:
         raise HTTPException(status_code=404, detail="no face detected")
 
@@ -268,6 +280,8 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 
     # Build normalized embedding index once for the whole lecture — reused across all frames
     persons_index = build_persons_index(persons_cache) if persons_cache else (None, None, None)
+    # Recognition uses the prebuilt matrix. Release the duplicate source arrays.
+    persons_cache = {}
     if persons_index[0] is not None:
         log.info(
             "[lecture=%s] persons_index built: %s unique ids, %s total embeddings",
@@ -276,12 +290,9 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
             persons_index[0].shape[0],
         )
 
-    # Worker pool: onnxruntime releases the GIL during inference, so recognize_b64
-    # scales across threads. По умолчанию — половина ядер сервера (минимум 1, максимум 4),
-    # чтобы потоки не конкурировали за CPU. Перебить можно через FACE_RECOGNITION_WORKERS.
-    _cpu = os.cpu_count() or 2
-    _default_workers = max(1, min(4, _cpu // 2))
-    num_workers = max(1, int(os.getenv("FACE_RECOGNITION_WORKERS", str(_default_workers))))
+    # Keep per-lecture IO/ack lifecycle; a shared budget in recognize_bytes
+    # limits actual CPU work across ALL lectures and HTTP embedding requests.
+    num_workers = INFERENCE_WORKERS
     executor = concurrent.futures.ThreadPoolExecutor(
         max_workers=num_workers,
         thread_name_prefix=f"rec-{rt.lecture_id}",
@@ -474,6 +485,18 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 # -----------------------------
 @app.post("/api/lecture/start")
 def lecture_start(payload: LectureStartIn):
+    # Repeated start requests must not fetch/compress the full gallery again.
+    # Recheck below after IO as another start may race with this request.
+    with _lectures_lock:
+        existing = _lectures.get(payload.lecture_id)
+        if existing and existing.running:
+            return {
+                "ok": True,
+                "status": "already_running",
+                "lecture_id": payload.lecture_id,
+                "in_queue": existing.in_queue,
+                "out_queue": existing.out_queue,
+            }
     # 1. Проверка OUT (куда публикуем результат)
     try:
         out_amqp_url = resolve_out_amqp_url_from_env()
@@ -566,7 +589,12 @@ def lecture_start(payload: LectureStartIn):
         )
         rt.thread = t
         _lectures[payload.lecture_id] = rt
-        t.start()
+        rt.running = True
+        try:
+            t.start()
+        except Exception:
+            rt.running = False
+            raise
 
     return {
         "ok": True,
