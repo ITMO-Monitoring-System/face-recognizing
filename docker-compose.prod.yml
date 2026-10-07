@@ -38,9 +38,12 @@ services:
     build:
       context: .
     depends_on:
-      - rabbitmq
-      - redis
-      - model-preload
+      rabbitmq:
+        condition: service_started
+      redis:
+        condition: service_started
+      model-preload:
+        condition: service_completed_successfully
     restart: unless-stopped
     ports:
       - "127.0.0.1:${APP_BIND_PORT:-18083}:8180"

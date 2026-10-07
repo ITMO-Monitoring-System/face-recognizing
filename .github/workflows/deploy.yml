@@ -1,90 +1,91 @@
-name: Deploy Face Recognizing
+name: CI and image
 
 on:
+  pull_request:
+    branches: [main]
   push:
-    branches: ["OneFace"]
-  workflow_dispatch: {}
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: deploy-face-recognizing-oneface
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    env:
-      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || secrets.SSH_HOST }}
-      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || secrets.SSH_PORT }}
-      DEPLOY_USERNAME: ${{ secrets.DEPLOY_USERNAME || secrets.SSH_USERNAME }}
-      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '~/site1/face-recognizing' }}
-      APP_ENV_FILE: ${{ secrets.APP_ENV_FILE }}
-      APP_CONTAINER: face-recognizing_face-service_1
-
+  checks:
+    name: Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Prepare runtime files
-        run: |
-          set -Eeuo pipefail
-          if [ -n "${APP_ENV_FILE:-}" ]; then
-            printf '%s\n' "${APP_ENV_FILE}" > .env.production
-          else
-            echo "APP_ENV_FILE is not set, keeping server-side .env.production"
-          fi
-
-      - name: Setup SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
+      - uses: actions/checkout@v6
         with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Check Python syntax
+        run: python -m compileall -q api.py download_model.py face_service logic
 
-      - name: Deploy to server
+  image:
+    name: Build and verify image
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Linux amd64 image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: itmo-ci:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Check runtime imports in the Linux image
+        run: docker run --rm --entrypoint python itmo-ci:test -c 'import api; from face_service.core.retina_embending import ConfiguredFaceAnalysis'
+        # Model downloads and full-stack checks belong to deployment acceptance.
+
+  publish:
+    name: Publish to GHCR
+    needs: [checks, image]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && github.repository == 'ITMO-Monitoring-System/face-recognizing'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish checked revision
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/itmo-monitoring-system/face-recognizing:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+      - name: Record release reference
+        env:
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
         run: |
-          set -Eeuo pipefail
-
-          : "${DEPLOY_HOST:?Missing DEPLOY_HOST (or SSH_HOST) secret}"
-          : "${DEPLOY_USERNAME:?Missing DEPLOY_USERNAME (or SSH_USERNAME) secret}"
-          DEPLOY_PORT="${DEPLOY_PORT:-22}"
-          REMOTE="${DEPLOY_USERNAME}@${DEPLOY_HOST}"
-
-          mkdir -p ~/.ssh
-          ssh-keyscan -p "${DEPLOY_PORT}" "${DEPLOY_HOST}" >> ~/.ssh/known_hosts
-
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "mkdir -p ${DEPLOY_PATH}"
-
-          rsync -az --delete \
-            --exclude ".git" \
-            --exclude ".github" \
-            --exclude ".codex" \
-            --exclude "__pycache__" \
-            --exclude ".pytest_cache" \
-            --exclude ".venv" \
-            --exclude ".env" \
-            -e "ssh -p ${DEPLOY_PORT}" \
-            ./ "${REMOTE}:${DEPLOY_PATH}/"
-
-          echo "Building images and recreating containers..."
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'cd ${DEPLOY_PATH} && podman-compose --env-file .env.production -f docker-compose.prod.yml up -d --build --force-recreate'"
-
-          echo "Removing dangling images to free disk space..."
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman image prune -f'"
-
-          echo "Container status after deploy:"
-          ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman ps'" || true
-
-          echo "Verifying ${APP_CONTAINER} is running..."
-          deploy_ok=
-          for attempt in $(seq 1 18); do
-            if ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman ps --filter name=${APP_CONTAINER} --filter status=running --quiet'" | grep -q .; then
-              deploy_ok=1
-              break
-            fi
-            echo "  ${APP_CONTAINER} not ready yet (${attempt}/18), waiting 5s..."
-            sleep 5
-          done
-          if [ -z "${deploy_ok:-}" ]; then
-            echo "::error::${APP_CONTAINER} is NOT running after deploy"
-            ssh -p "${DEPLOY_PORT}" "${REMOTE}" "bash -l -c 'podman ps -a'" || true
-            exit 1
-          fi
-          echo "${APP_CONTAINER} is running — deploy verified."
+          printf '### face-recognizing image\n\n`ghcr.io/itmo-monitoring-system/face-recognizing@%s`\n' "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
