@@ -79,7 +79,9 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/itmo-monitoring-system/face-recognizing:sha-${{ github.sha }}
+          tags: |
+            ghcr.io/itmo-monitoring-system/face-recognizing:sha-${{ github.sha }}
+            ghcr.io/itmo-monitoring-system/face-recognizing:main
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
