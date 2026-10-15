@@ -202,22 +202,23 @@ def test_prebuilt_index_works_without_source_gallery(monkeypatch):
 
 
 @pytest.mark.parametrize("binary", [False, True])
-def test_amqp_input_output_and_ack_contract(monkeypatch, binary):
+@pytest.mark.parametrize("matched", [False, True])
+def test_amqp_input_output_and_ack_contract(monkeypatch, binary, matched):
     events = []
     rt = api.LectureRuntime(12, "amqp://in", "faces.in", "amqp://out", "faces.out", .45)
     monkeypatch.setattr(api, "load_dataset", lambda *a: {"123": [np.array([1., 0.])]})
-    monkeypatch.setattr(api, "notify_backend_start", lambda *a: None)
+    monkeypatch.setattr(api, "notify_backend_start", lambda *a: events.append(("notify_start",)))
     monkeypatch.setattr(api, "notify_backend_stop", lambda *a: None)
     def recognize_input(data, persons, threshold, prebuilt_index):
         assert data == (b"jpeg" if binary else "anBlZw==")
         assert persons == {}
         assert threshold == .6
         np.testing.assert_array_equal(prebuilt_index[0], [[1., 0.]])
-        return [{"person_id": "123", "matched": True, "score": .9}]
+        return [{"person_id": "123", "matched": True, "score": .9}] if matched else []
     monkeypatch.setattr(api, "recognize_bytes" if binary else "recognize_b64", recognize_input)
     class Channel:
         def queue_declare(self, **kwargs):
-            pass
+            events.append(("declare", kwargs["queue"]))
         def basic_qos(self, **kwargs):
             pass
         def basic_consume(self, **kwargs):
@@ -241,5 +242,9 @@ def test_amqp_input_output_and_ack_contract(monkeypatch, binary):
             self.is_closed = True
     monkeypatch.setattr(api, "_make_blocking_conn", lambda *a: Connection())
     api.run_lecture_consumer(rt)
-    assert events == [("publish", "faces.out", {"lecture_id": 12, "person_id": "123"}), ("ack", 7)]
+    expected = [("declare", "faces.in"), ("declare", "faces.out"), ("notify_start",)]
+    if matched:
+        expected.append(("publish", "faces.out", {"lecture_id": 12, "person_id": "123"}))
+    expected.append(("ack", 7))
+    assert events == expected
     assert not rt.running

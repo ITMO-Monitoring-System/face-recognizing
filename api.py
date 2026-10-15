@@ -303,7 +303,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
     def ensure_out_ready() -> None:
         if out_ctx.conn and out_ctx.ch and not out_ctx.conn.is_closed:
             return
-        log.info("[lecture=%s] OUT creating connection to %s", rt.lecture_id, rt.out_amqp_url)
+        log.info("[lecture=%s] OUT creating connection", rt.lecture_id)
         out_ctx.conn = _make_blocking_conn(rt.out_amqp_url)
         out_ctx.ch = out_ctx.conn.channel()
         out_ctx.ch.queue_declare(queue=rt.out_queue, durable=True)
@@ -400,6 +400,9 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         rt.in_ch.queue_declare(queue=rt.in_queue, durable=True)
         rt.in_ch.basic_qos(prefetch_count=num_workers)
 
+        # The backend consumes this queue as soon as it receives the start
+        # notification. Declare it first, even if no face has matched yet.
+        ensure_out_ready()
         log.info(
             "[lecture=%s] consumer started in_queue=%s out_queue=%s workers=%s",
             rt.lecture_id,
@@ -407,7 +410,6 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
             rt.out_queue,
             num_workers,
         )
-
         notify_backend_start(rt.lecture_id, rt.out_queue)
 
         def on_message(ch, method, props, body: bytes):
