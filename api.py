@@ -4,11 +4,16 @@ import concurrent.futures
 import json
 import logging
 import os
+import re
 import threading
+import time
+import traceback
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
 
 from face_service.core.runtime import INFERENCE_WORKERS
+from face_service.core.message_context import request_id_from_message
 
 try:
     import uvloop
@@ -33,8 +38,33 @@ from face_service.core.recognize import (
 from logic.dataset_store import delete_dataset, load_dataset, make_redis, save_dataset
 from face_service.core.retina_embending import get_app
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+class SafeJsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        message = re.sub(r"(?i)\b(amqps?|postgres(?:ql)?|redis|https?)://[^\s/@:]+:[^\s/@]+@", r"\1://[REDACTED]@", message)
+        try:
+            event = json.loads(message)
+            if not isinstance(event, dict) or "event" not in event:
+                raise ValueError
+        except ValueError:
+            event = {"event": "legacy_log", "message": message}
+        event.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        event.setdefault("level", record.levelname.lower())
+        event.setdefault("service", "face_recognizing")
+        if record.exc_info:
+            event["exception_type"] = record.exc_info[0].__name__
+            event["stack"] = [f"{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(record.exc_info[2])]
+        return json.dumps(event, ensure_ascii=False)
+
+
+logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(SafeJsonFormatter())
 log = logging.getLogger("face-service")
+
+
+def event(name: str, lecture_id: int, **fields: Any) -> None:
+    log.info(json.dumps({"event": name, "lecture_id": lecture_id, **fields}, ensure_ascii=False))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -245,13 +275,15 @@ def notify_backend_start(lecture_id: int, out_queue: str) -> None:
     if not base:
         return
     try:
-        requests.post(
+        response = requests.post(
             f"{base}{start_path}",
             json={"lecture_id": _lecture_id_payload_value(lecture_id), "queue": out_queue},
             timeout=5,
         )
+        response.raise_for_status()
+        event("backend_start_notified", lecture_id, status=response.status_code)
     except Exception as e:
-        log.warning("[lecture=%s] backend start notify failed: %s", lecture_id, e)
+        log.warning("[lecture=%s] backend start notify failed: %s", lecture_id, type(e).__name__)
 
 
 def notify_backend_stop(lecture_id: int, out_queue: str) -> None:
@@ -259,13 +291,15 @@ def notify_backend_stop(lecture_id: int, out_queue: str) -> None:
     if not base:
         return
     try:
-        requests.post(
+        response = requests.post(
             f"{base}{stop_path}",
             json={"lecture_id": _lecture_id_payload_value(lecture_id), "queue": out_queue},
             timeout=5,
         )
+        response.raise_for_status()
+        event("backend_stop_notified", lecture_id, status=response.status_code)
     except Exception as e:
-        log.warning("[lecture=%s] backend stop notify failed: %s", lecture_id, e)
+        log.warning("[lecture=%s] backend stop notify failed: %s", lecture_id, type(e).__name__)
 
 
 # -----------------------------
@@ -319,14 +353,17 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 routing_key=rt.out_queue,
                 body=body,
             )
+            event("recognition_published", rt.lecture_id, request_id=payload.get("request_id"), outcome="queued")
             return True
         except Exception as e:
-            rt.last_error = f"OUT publish failed: {e}"
+            rt.last_error = f"OUT publish failed: {type(e).__name__}"
+            event("recognition_publish_failed", rt.lecture_id, request_id=payload.get("request_id"),
+                  error_type=type(e).__name__)
             log.error(
                 "[lecture=%s] OUT publish FAILED queue=%s err=%r",
                 rt.lecture_id,
                 rt.out_queue,
-                e,
+                type(e).__name__,
             )
             out_ctx.close()
             return False
@@ -338,6 +375,9 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         - content_type=image/jpeg → raw JPEG в body, метаданные в headers (новый).
         - JSON-объект в body с ключом image_b64 (legacy).
         """
+        started = time.monotonic()
+        request_id = request_id_from_message(body, content_type, headers)
+        outcome = "no_face"
         try:
             if content_type == "image/jpeg":
                 hdr = headers or {}
@@ -346,7 +386,8 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 except (TypeError, ValueError):
                     thr = rt.threshold
                 if persons_index[0] is None:
-                    return {"lecture_id": rt.lecture_id, "person_id": None}
+                    outcome = "no_dataset"
+                    return {"lecture_id": rt.lecture_id, "person_id": None, "request_id": request_id}
                 faces = recognize_bytes(body, persons_cache, threshold=thr, prebuilt_index=persons_index)
             else:
                 msg = json.loads(body.decode("utf-8"))
@@ -354,32 +395,23 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 thr = float(msg.get("threshold", rt.threshold))
 
                 if not image_b64:
+                    outcome = "invalid_payload"
                     log.warning("[lecture=%s ctx=%s] no image_b64 keys=%s",
                                 rt.lecture_id, ctx, list(msg.keys()))
-                    return {"lecture_id": rt.lecture_id, "person_id": None}
+                    return {"lecture_id": rt.lecture_id, "person_id": None, "request_id": request_id}
 
                 if persons_index[0] is None:
-                    return {"lecture_id": rt.lecture_id, "person_id": None}
+                    outcome = "no_dataset"
+                    return {"lecture_id": rt.lecture_id, "person_id": None, "request_id": request_id}
 
                 faces = recognize_b64(image_b64, persons_cache, threshold=thr, prebuilt_index=persons_index)
 
             person_id = None
             if faces:
-                if log.isEnabledFor(logging.DEBUG):
-                    brief = [
-                        {
-                            "matched": f.get("matched"),
-                            "person_id": f.get("person_id"),
-                            "score": f.get("score"),
-                            "det_score": f.get("det_score"),
-                        }
-                        for f in faces[:3]
-                    ]
-                    log.debug("[lecture=%s ctx=%s] recognize top=%s", rt.lecture_id, ctx, brief)
-
                 best_match = _pick_best_match(faces)
                 if best_match:
                     person_id = best_match.get("person_id")
+                outcome = "match" if person_id else "no_match"
 
                 # INFO-лог при no-match: видно best_score чтобы понять near-miss или совсем нет.
                 if person_id is None:
@@ -389,10 +421,14 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                         rt.lecture_id, len(faces), scores, thr,
                     )
 
-            return {"lecture_id": rt.lecture_id, "person_id": person_id}
+            return {"lecture_id": rt.lecture_id, "person_id": person_id, "request_id": request_id}
         except Exception:
             log.exception("[lecture=%s ctx=%s] worker error", rt.lecture_id, ctx)
-            return {"lecture_id": rt.lecture_id, "person_id": None}
+            outcome = "error"
+            return {"lecture_id": rt.lecture_id, "person_id": None, "request_id": request_id}
+        finally:
+            event("recognition_result", rt.lecture_id, request_id=request_id, outcome=outcome,
+                  duration_ms=round((time.monotonic() - started) * 1000, 2))
 
     try:
         rt.in_conn = _make_blocking_conn(rt.in_amqp_url)
@@ -417,6 +453,8 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
             ctx = str(delivery_tag)
             content_type = getattr(props, "content_type", None) if props else None
             headers = getattr(props, "headers", None) if props else None
+            request_id = request_id_from_message(body, content_type, headers)
+            event("crop_received", rt.lecture_id, request_id=request_id, bytes=len(body))
 
             future = executor.submit(do_recognize, body, content_type, headers, ctx)
 
@@ -434,15 +472,13 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                     ch.basic_ack(delivery_tag=delivery_tag)
                 except Exception:
                     log.exception("[lecture=%s] ack failed tag=%s", rt.lecture_id, delivery_tag)
-                if log.isEnabledFor(logging.DEBUG):
-                    log.debug("[lecture=%s] result %s", rt.lecture_id, result)
 
             def on_done(fut: concurrent.futures.Future):
                 try:
                     result = fut.result()
                 except Exception:
                     log.exception("[lecture=%s] future error", rt.lecture_id)
-                    result = {"lecture_id": rt.lecture_id, "person_id": None}
+                    result = {"lecture_id": rt.lecture_id, "person_id": None, "request_id": request_id}
                 try:
                     rt.in_conn.add_callback_threadsafe(lambda: finalize(result))
                 except Exception:
@@ -454,7 +490,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         rt.in_ch.start_consuming()
 
     except Exception as e:
-        rt.last_error = str(e)
+        rt.last_error = type(e).__name__
         log.exception("[lecture=%s] consumer stopped with error", rt.lecture_id)
 
     finally:
@@ -505,13 +541,13 @@ def lecture_start(payload: LectureStartIn):
         out_queue = resolve_out_queue_for_lecture(payload.lecture_id)
         _test_rabbit_connect(out_amqp_url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"cannot connect to OUT: {e}")
+        raise HTTPException(status_code=400, detail=f"cannot connect to OUT: {type(e).__name__}")
 
     # 2. Проверка IN (откуда читаем фотки)
     try:
         _test_rabbit_connect(payload.in_amqp_url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"cannot connect to in_amqp_url: {e}")
+        raise HTTPException(status_code=400, detail=f"cannot connect to in_amqp_url: {type(e).__name__}")
 
     base, _, _ = backend_cfg()
     if not base:
@@ -525,7 +561,7 @@ def lecture_start(payload: LectureStartIn):
         resp.raise_for_status()
         dataset = resp.json()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"cannot fetch dataset from backend: {e}")
+        raise HTTPException(status_code=500, detail=f"cannot fetch dataset from backend: {type(e).__name__}")
 
     # 4. Кладём датасет в Redis
     persons: Dict[str, List[np.ndarray]] = {}
@@ -628,8 +664,8 @@ def lecture_stop(payload: LectureStopIn):
                 "out_queue": out_queue,
             }
         except Exception as e:
-            rt.last_error = str(e)
-            return {"ok": False, "error": str(e), "lecture_id": payload.lecture_id}
+            rt.last_error = type(e).__name__
+            return {"ok": False, "error": type(e).__name__, "lecture_id": payload.lecture_id}
 
     return {"ok": True, "status": "not_running", "lecture_id": payload.lecture_id, "out_queue": out_queue}
 
@@ -644,7 +680,6 @@ def lecture_status():
                     "lecture_id": k,
                     "running": v.running,
                     "in_queue": v.in_queue,
-                    "in_amqp_url": v.in_amqp_url,
                     "out_queue": v.out_queue,
                     "last_error": v.last_error,
                 }
