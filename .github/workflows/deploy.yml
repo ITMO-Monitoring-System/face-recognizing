@@ -28,6 +28,8 @@ jobs:
           python-version: '3.11'
       - name: Check Python syntax
         run: python -m compileall -q api.py download_model.py face_service logic
+      - name: Check crop message compatibility
+        run: python -m unittest discover -s tests -p 'test_message_context.py'
 
   image:
     name: Build and verify image
