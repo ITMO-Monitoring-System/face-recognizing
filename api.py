@@ -353,12 +353,13 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 routing_key=rt.out_queue,
                 body=body,
             )
-            event("recognition_published", rt.lecture_id, request_id=payload.get("request_id"), outcome="queued")
+            event("recognition_published", rt.lecture_id, request_id=payload.get("request_id"),
+                  person_id=payload.get("person_id"), outcome="queued")
             return True
         except Exception as e:
             rt.last_error = f"OUT publish failed: {type(e).__name__}"
             event("recognition_publish_failed", rt.lecture_id, request_id=payload.get("request_id"),
-                  error_type=type(e).__name__)
+                  person_id=payload.get("person_id"), error_type=type(e).__name__)
             log.error(
                 "[lecture=%s] OUT publish FAILED queue=%s err=%r",
                 rt.lecture_id,
@@ -378,6 +379,11 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         started = time.monotonic()
         request_id = request_id_from_message(body, content_type, headers)
         outcome = "no_face"
+        person_id = None
+        threshold_used = None
+        faces = []
+        best_score = None
+        detection_score = None
         try:
             if content_type == "image/jpeg":
                 hdr = headers or {}
@@ -385,6 +391,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                     thr = float(hdr.get("threshold", rt.threshold))
                 except (TypeError, ValueError):
                     thr = rt.threshold
+                threshold_used = thr
                 if persons_index[0] is None:
                     outcome = "no_dataset"
                     return {"lecture_id": rt.lecture_id, "person_id": None, "request_id": request_id}
@@ -393,6 +400,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 msg = json.loads(body.decode("utf-8"))
                 image_b64 = msg.get("image_b64")
                 thr = float(msg.get("threshold", rt.threshold))
+                threshold_used = thr
 
                 if not image_b64:
                     outcome = "invalid_payload"
@@ -406,12 +414,21 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 
                 faces = recognize_b64(image_b64, persons_cache, threshold=thr, prebuilt_index=persons_index)
 
-            person_id = None
             if faces:
                 best_match = _pick_best_match(faces)
                 if best_match:
                     person_id = best_match.get("person_id")
+                    detection_score = best_match.get("det_score")
                 outcome = "match" if person_id else "no_match"
+                valid_scores = []
+                for face in faces:
+                    try:
+                        score = face.get("confidence")
+                        valid_scores.append(float(score if score is not None else face.get("score")))
+                    except (TypeError, ValueError):
+                        pass
+                if valid_scores:
+                    best_score = round(max(valid_scores), 4)
 
                 # INFO-лог при no-match: видно best_score чтобы понять near-miss или совсем нет.
                 if person_id is None:
@@ -427,8 +444,18 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
             outcome = "error"
             return {"lecture_id": rt.lecture_id, "person_id": None, "request_id": request_id}
         finally:
-            event("recognition_result", rt.lecture_id, request_id=request_id, outcome=outcome,
-                  duration_ms=round((time.monotonic() - started) * 1000, 2))
+            fields = {"request_id": request_id, "outcome": outcome,
+                      "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                      "face_count": len(faces) if faces else 0}
+            if threshold_used is not None:
+                fields["threshold"] = threshold_used
+            if best_score is not None:
+                fields["best_score"] = best_score
+            if detection_score is not None:
+                fields["detection_score"] = detection_score
+            if outcome == "match" and person_id:
+                fields["person_id"] = person_id
+            event("recognition_result", rt.lecture_id, **fields)
 
     try:
         rt.in_conn = _make_blocking_conn(rt.in_amqp_url)
