@@ -11,9 +11,10 @@ import traceback
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import UUID
 
 from face_service.core.runtime import INFERENCE_WORKERS
-from face_service.core.message_context import request_id_from_message
+from face_service.core.message_context import observation_time, request_id_from_message
 
 try:
     import uvloop
@@ -171,6 +172,7 @@ class LectureStartIn(BaseModel):
     in_amqp_url: str = Field(..., min_length=1)
     in_queue: str = Field(..., min_length=1)
     threshold: float = DEFAULT_RECOGNITION_THRESHOLD
+    run_id: UUID | None = None
 
 
 class LectureStopIn(BaseModel):
@@ -192,7 +194,9 @@ class LectureRuntime:
         out_amqp_url: str,
         out_queue: str,
         threshold: float,
+        run_id: str | None = None,
     ):
+        self.run_id = run_id
         self.lecture_id = lecture_id
         self.in_amqp_url = in_amqp_url
         self.in_queue = in_queue
@@ -270,14 +274,14 @@ def _pick_best_match(faces: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     return max(matched_faces, key=lambda face: float(face.get("confidence") or face.get("score") or -1.0))
 
 
-def notify_backend_start(lecture_id: int, out_queue: str) -> None:
+def notify_backend_start(lecture_id: int, out_queue: str, run_id: str | None) -> None:
     base, start_path, _ = backend_cfg()
     if not base:
         return
     try:
         response = requests.post(
             f"{base}{start_path}",
-            json={"lecture_id": _lecture_id_payload_value(lecture_id), "queue": out_queue},
+            json={"lecture_id": _lecture_id_payload_value(lecture_id), "queue": out_queue, **({"run_id": run_id} if run_id else {})},
             timeout=5,
         )
         response.raise_for_status()
@@ -286,14 +290,14 @@ def notify_backend_start(lecture_id: int, out_queue: str) -> None:
         log.warning("[lecture=%s] backend start notify failed: %s", lecture_id, type(e).__name__)
 
 
-def notify_backend_stop(lecture_id: int, out_queue: str) -> None:
+def notify_backend_stop(lecture_id: int, out_queue: str, run_id: str | None) -> None:
     base, _, stop_path = backend_cfg()
     if not base:
         return
     try:
         response = requests.post(
             f"{base}{stop_path}",
-            json={"lecture_id": _lecture_id_payload_value(lecture_id), "queue": out_queue},
+            json={"lecture_id": _lecture_id_payload_value(lecture_id), "queue": out_queue, **({"run_id": run_id} if run_id else {})},
             timeout=5,
         )
         response.raise_for_status()
@@ -384,9 +388,11 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         faces = []
         best_score = None
         detection_score = None
+        captured_at = None
         try:
             if content_type == "image/jpeg":
                 hdr = headers or {}
+                captured_at = hdr.get("ts")
                 try:
                     thr = float(hdr.get("threshold", rt.threshold))
                 except (TypeError, ValueError):
@@ -398,6 +404,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                 faces = recognize_bytes(body, persons_cache, threshold=thr, prebuilt_index=persons_index)
             else:
                 msg = json.loads(body.decode("utf-8"))
+                captured_at = msg.get("ts")
                 image_b64 = msg.get("image_b64")
                 thr = float(msg.get("threshold", rt.threshold))
                 threshold_used = thr
@@ -438,7 +445,13 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
                         rt.lecture_id, len(faces), scores, thr,
                     )
 
-            return {"lecture_id": rt.lecture_id, "person_id": person_id, "request_id": request_id}
+            result = {
+                "lecture_id": rt.lecture_id, "person_id": person_id, "request_id": request_id,
+                "observed_at": observation_time(captured_at),
+            }
+            if rt.run_id is not None:
+                result["run_id"] = rt.run_id
+            return result
         except Exception:
             log.exception("[lecture=%s ctx=%s] worker error", rt.lecture_id, ctx)
             outcome = "error"
@@ -460,7 +473,11 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
     try:
         rt.in_conn = _make_blocking_conn(rt.in_amqp_url)
         rt.in_ch = rt.in_conn.channel()
-        rt.in_ch.queue_declare(queue=rt.in_queue, durable=True)
+        if rt.run_id is None:
+            rt.in_ch.queue_declare(queue=rt.in_queue, durable=True)
+        else:
+            # Tracking owns the run-specific queue and its arguments.
+            rt.in_ch.queue_declare(queue=rt.in_queue, passive=True)
         rt.in_ch.basic_qos(prefetch_count=num_workers)
 
         # The backend consumes this queue as soon as it receives the start
@@ -473,7 +490,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
             rt.out_queue,
             num_workers,
         )
-        notify_backend_start(rt.lecture_id, rt.out_queue)
+        notify_backend_start(rt.lecture_id, rt.out_queue, rt.run_id)
 
         def on_message(ch, method, props, body: bytes):
             delivery_tag = method.delivery_tag
@@ -521,7 +538,7 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
         log.exception("[lecture=%s] consumer stopped with error", rt.lecture_id)
 
     finally:
-        notify_backend_stop(rt.lecture_id, rt.out_queue)
+        notify_backend_stop(rt.lecture_id, rt.out_queue, rt.run_id)
 
         try:
             executor.shutdown(wait=True, cancel_futures=True)
@@ -550,15 +567,17 @@ def run_lecture_consumer(rt: LectureRuntime) -> None:
 # -----------------------------
 @app.post("/api/lecture/start")
 def lecture_start(payload: LectureStartIn):
+    run_id = str(payload.run_id) if payload.run_id is not None else None
     # Repeated start requests must not fetch/compress the full gallery again.
     # Recheck below after IO as another start may race with this request.
     with _lectures_lock:
         existing = _lectures.get(payload.lecture_id)
-        if existing and existing.running:
+        if existing and existing.running and (run_id is None or existing.run_id == run_id):
             return {
                 "ok": True,
                 "status": "already_running",
                 "lecture_id": payload.lecture_id,
+                **({"run_id": run_id} if run_id else {}),
                 "in_queue": existing.in_queue,
                 "out_queue": existing.out_queue,
             }
@@ -629,11 +648,12 @@ def lecture_start(payload: LectureStartIn):
     # 5. Стартуем consumer
     with _lectures_lock:
         existing = _lectures.get(payload.lecture_id)
-        if existing and existing.running:
+        if existing and existing.running and (run_id is None or existing.run_id == run_id):
             return {
                 "ok": True,
                 "status": "already_running",
                 "lecture_id": payload.lecture_id,
+                **({"run_id": run_id} if run_id else {}),
                 "in_queue": existing.in_queue,
                 "out_queue": existing.out_queue,
             }
@@ -645,6 +665,7 @@ def lecture_start(payload: LectureStartIn):
             out_amqp_url=out_amqp_url,
             out_queue=out_queue,
             threshold=payload.threshold,
+            run_id=run_id,
         )
 
         t = threading.Thread(
@@ -666,6 +687,7 @@ def lecture_start(payload: LectureStartIn):
         "status": "started",
         "lecture_id": payload.lecture_id,
         "out_queue": out_queue,
+        **({"run_id": run_id} if run_id else {}),
         "persons_loaded": len(persons),
     }
 

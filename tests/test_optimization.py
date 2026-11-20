@@ -205,9 +205,10 @@ def test_prebuilt_index_works_without_source_gallery(monkeypatch):
 @pytest.mark.parametrize("matched", [False, True])
 def test_amqp_input_output_and_ack_contract(monkeypatch, binary, matched):
     events = []
-    rt = api.LectureRuntime(12, "amqp://in", "faces.in", "amqp://out", "faces.out", .45)
+    run_id = "bf2bbb99-22b0-49e4-9bda-16b1d4252dc1"
+    rt = api.LectureRuntime(12, "amqp://in", "faces.in", "amqp://out", "faces.out", .45, run_id)
     monkeypatch.setattr(api, "load_dataset", lambda *a: {"123": [np.array([1., 0.])]})
-    monkeypatch.setattr(api, "notify_backend_start", lambda *a: events.append(("notify_start",)))
+    monkeypatch.setattr(api, "notify_backend_start", lambda *a: events.append(("notify_start", *a)))
     monkeypatch.setattr(api, "notify_backend_stop", lambda *a: None)
     def recognize_input(data, persons, threshold, prebuilt_index):
         assert data == (b"jpeg" if binary else "anBlZw==")
@@ -218,15 +219,16 @@ def test_amqp_input_output_and_ack_contract(monkeypatch, binary, matched):
     monkeypatch.setattr(api, "recognize_bytes" if binary else "recognize_b64", recognize_input)
     class Channel:
         def queue_declare(self, **kwargs):
-            events.append(("declare", kwargs["queue"]))
+            events.append(("declare", kwargs["queue"], kwargs.get("passive", False)))
         def basic_qos(self, **kwargs):
             pass
         def basic_consume(self, **kwargs):
             self.callback = kwargs["on_message_callback"]
         def start_consuming(self):
+            meta = {"threshold": .6, "request_id": "crop-7", "ts": 1794567467.52}
             props = SimpleNamespace(content_type="image/jpeg" if binary else "application/json",
-                                    headers={"threshold": .6})
-            body = b"jpeg" if binary else json.dumps({"image_b64": "anBlZw==", "threshold": .6}).encode()
+                                    headers=meta if binary else {})
+            body = b"jpeg" if binary else json.dumps({"image_b64": "anBlZw==", **meta}).encode()
             self.callback(self, SimpleNamespace(delivery_tag=7), props, body)
         def basic_publish(self, **kwargs):
             events.append(("publish", kwargs["routing_key"], json.loads(kwargs["body"])))
@@ -242,9 +244,13 @@ def test_amqp_input_output_and_ack_contract(monkeypatch, binary, matched):
             self.is_closed = True
     monkeypatch.setattr(api, "_make_blocking_conn", lambda *a: Connection())
     api.run_lecture_consumer(rt)
-    expected = [("declare", "faces.in"), ("declare", "faces.out"), ("notify_start",)]
+    expected = [("declare", "faces.in", True), ("declare", "faces.out", False),
+                ("notify_start", 12, "faces.out", run_id)]
     if matched:
-        expected.append(("publish", "faces.out", {"lecture_id": 12, "person_id": "123"}))
+        expected.append(("publish", "faces.out", {
+            "lecture_id": 12, "person_id": "123", "request_id": "crop-7",
+            "run_id": run_id, "observed_at": "2026-11-13T10:57:47.520000+00:00",
+        }))
     expected.append(("ack", 7))
     assert events == expected
     assert not rt.running
